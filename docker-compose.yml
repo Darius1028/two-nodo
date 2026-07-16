@@ -1,0 +1,44 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: academic_nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./public:/var/www/html/public:ro
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - php-app
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  php-app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: academic_php
+    volumes:
+      - .:/var/www/html
+      # FIX: /vendor está en .gitignore y no existe en el host tras un clone
+      # limpio. Sin este volumen nombrado, el bind mount de arriba (".:/var/www/html")
+      # tapa el vendor/ instalado durante el build de la imagen y la app
+      # revienta con "vendor/autoload.php not found". Este volumen "gana" sobre
+      # el bind mount solo para esa subcarpeta, preservando lo instalado en la imagen.
+      - vendor_data:/var/www/html/vendor
+      - var_data:/var/www/html/var
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  vendor_data:
+  var_data:

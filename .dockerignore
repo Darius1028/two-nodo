@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+vendor
+var
+docker
+docker-compose*.yml
+*.md
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+tests
+.github
+node_modules
