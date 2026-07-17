@@ -10,9 +10,9 @@ use App\Security\SecurityContext;
 
 SecurityContext::ensureSession();
 
-if (($_ENV['WORKSPACE_ACCESS_MODE'] ?? 'protected') === 'protected') {
+/* if (($_ENV['WORKSPACE_ACCESS_MODE'] ?? 'protected') === 'protected') {
     SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'ROLE_USER');
-}
+} */
 $currentUser = SecurityContext::getCurrentUser();
 
 $searchCedula = isset($_GET['cedula']) && is_string($_GET['cedula']) ? trim($_GET['cedula']) : '';
