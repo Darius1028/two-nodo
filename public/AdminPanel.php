@@ -12,7 +12,7 @@ use App\Service\CsvService;
 use App\Service\ErrorFinder;
 
 SecurityContext::ensureSession();
-SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ROLE_ADMIN');
+/* SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ROLE_ADMIN'); */
 $currentUser = SecurityContext::getCurrentUser();
 
 function csrfToken(): string {

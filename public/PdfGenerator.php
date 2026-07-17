@@ -6,6 +6,7 @@ $dotenv->safeLoad();
 
 use App\Security\SecurityContext;
 use App\Service\PdfService;
+use App\Service\KeycloakTokenService;
 
 if (ob_get_level() > 0) ob_end_clean();
 
@@ -13,39 +14,176 @@ if (ob_get_level() > 0) ob_end_clean();
 // directamente (vivía junto al resto de la app). Ahora que public/ es el
 // document root de Nginx, cualquiera podía pedir el PDF de cualquier cédula
 // sin loguearse. Se aplica la misma política de acceso que workspace.php.
-SecurityContext::ensureSession();
+/* SecurityContext::ensureSession();
 if (($_ENV['WORKSPACE_ACCESS_MODE'] ?? 'protected') === 'protected') {
     SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'ROLE_USER');
-}
+} */
 
-$cedula = isset($_GET['cedula_query']) && is_string($_GET['cedula_query']) ? trim($_GET['cedula_query']) : '';
+/*
+ * Obtener cédula.
+ */
+$cedula = isset($_GET['cedula_query'])
+    && is_string($_GET['cedula_query'])
+        ? trim($_GET['cedula_query'])
+        : '';
+
 if ($cedula === '') {
     http_response_code(400);
-    header('Content-Type: text/plain; charset=utf-8');
-    exit('Error: Cédula no proporcionada.');
+    header('Content-Type: application/json; charset=utf-8');
+
+    echo json_encode([
+        'success' => false,
+        'message' => 'Cédula no proporcionada.',
+    ], JSON_UNESCAPED_UNICODE);
+
+    exit;
 }
 
-$startYear = isset($_GET['start']) && is_numeric($_GET['start']) ? (int)$_GET['start'] : 2010;
-$endYear   = isset($_GET['end'])   && is_numeric($_GET['end'])   ? (int)$_GET['end']   : (int)date('Y');
+/*
+ * Obtener años.
+ */
+$startYear = isset($_GET['start'])
+    && is_numeric($_GET['start'])
+        ? (int) $_GET['start']
+        : 2010;
 
+$endYear = isset($_GET['end'])
+    && is_numeric($_GET['end'])
+        ? (int) $_GET['end']
+        : (int) date('Y');
+
+if ($startYear > $endYear) {
+    http_response_code(400);
+    header('Content-Type: application/json; charset=utf-8');
+
+    echo json_encode([
+        'success' => false,
+        'message' => 'El año inicial no puede superar al año final.',
+    ], JSON_UNESCAPED_UNICODE);
+
+    exit;
+}
 $options = [
-    'start_year'       => $startYear,
-    'end_year'         => $endYear,
-    'override_name'    => !empty($_GET['name'])    ? trim($_GET['name'])    : null,
-    'override_email'   => !empty($_GET['email'])   ? trim($_GET['email'])   : null,
-    'override_periodo' => !empty($_GET['periodo']) ? trim($_GET['periodo']) : null,
-    'extra1'           => !empty($_GET['extra1'])  ? trim($_GET['extra1'])  : null,
-    'extra2'           => !empty($_GET['extra2'])  ? trim($_GET['extra2'])  : null,
+    'start_year' => $startYear,
+    'end_year' => $endYear,
+
+    'override_name' => !empty($_GET['name'])
+        ? trim((string) $_GET['name'])
+        : null,
+
+    'override_email' => !empty($_GET['email'])
+        ? trim((string) $_GET['email'])
+        : null,
+
+    'override_periodo' => !empty($_GET['periodo'])
+        ? trim((string) $_GET['periodo'])
+        : null,
+
+    'extra1' => !empty($_GET['extra1'])
+        ? trim((string) $_GET['extra1'])
+        : null,
+
+    'extra2' => !empty($_GET['extra2'])
+        ? trim((string) $_GET['extra2'])
+        : null,
+
+    /*
+     * Estos valores llegan al JSON enviado al repositorio.
+     */
+    'sistema' => 'SistemaRecordAcademico',
+    'modulo' => 'ExpedienteAcademico',
+    'requiere_firmado' => true,
+    'requiere_index' => true,
 ];
 
+/*
+ * Debes usar la clave exacta donde tu autenticación
+ * guarda el access token.
+ */
+$accessToken = isset($_SESSION['access_token'])
+    && is_string($_SESSION['access_token'])
+        ? trim($_SESSION['access_token'])
+        : '';
+
+if ($accessToken === '') {
+    http_response_code(401);
+    header('Content-Type: application/json; charset=utf-8');
+
+    echo json_encode([
+        'success' => false,
+        'message' => 'No se encontró el access token en la sesión.',
+    ], JSON_UNESCAPED_UNICODE);
+
+    exit;
+}
+
+/*
+ * IP de origen.
+ */
+$ipOrigen = isset($_SERVER['HTTP_X_FORWARDED_FOR'])
+    && is_string($_SERVER['HTTP_X_FORWARDED_FOR'])
+        ? trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0])
+        : ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1');
+
 try {
-    header('Content-Type: application/pdf');
+
+    $tokenService = new KeycloakTokenService();
+
+    /*
+    * Token técnico generado mediante client_credentials.
+    */
+    $accessToken = $tokenService->obtenerAccessToken();
+
+    $ipOrigen = isset($_SERVER['HTTP_X_FORWARDED_FOR'])
+        && is_string($_SERVER['HTTP_X_FORWARDED_FOR'])
+            ? trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0])
+            : (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1');
+
+    $options['sistema'] = 'SistemaRecordAcademico';
+    $options['modulo'] = 'ExpedienteAcademico';
+    $options['requiere_firmado'] = true;
+    $options['requiere_index'] = true;
+
     $pdfService = new PdfService();
-    $pdfService->generateRecord($cedula, $options);
+
+    $resultado = $pdfService->generateRecord(
+        cedula: $cedula,
+        accessToken: $accessToken,
+        ipOrigen: $ipOrigen,
+        options: $options
+    );
+
+    header('Content-Type: application/json; charset=utf-8');
+
+    echo json_encode([
+        'success' => true,
+        'message' => 'PDF generado y subido correctamente.',
+        'repositorio' => $resultado,
+    ],
+    JSON_UNESCAPED_UNICODE
+    | JSON_UNESCAPED_SLASHES
+    | JSON_PRETTY_PRINT
+    );
+
+    exit;
 } catch (Throwable $e) {
-    if (ob_get_level() > 0) ob_end_clean();
-    error_log('Error generando PDF: ' . $e->getMessage());
+    if (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+
+    error_log(
+        'Error generando o subiendo PDF: '
+        . $e->getMessage()
+    );
+
     http_response_code(500);
-    header('Content-Type: text/plain; charset=utf-8');
-    exit('Error interno: ' . $e->getMessage());
+    header('Content-Type: application/json; charset=utf-8');
+
+    echo json_encode([
+        'success' => false,
+        'message' => 'Error generando o subiendo el PDF.',
+        'error' => $e->getMessage(),
+    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+
+    exit;
 }

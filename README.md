@@ -91,13 +91,12 @@ cp .env.example .env
 | `DB_HOST` | Host de SQL Server | `10.1.27.25` |
 | `DB_PORT` | Puerto de SQL Server | `1433` |
 | `DB_INSTANCE` | Instancia SQL Server | `SQLEXPRESS` |
-| `DB_NAME` | Nombre de la base de datos | `record_academico_db` |
+| `DB_NAME` | Nombre de la base de datos | `academic_records` |
 | `DB_USER` | Usuario de la base de datos | `sa` |
 | `DB_PASS` | Contraseña | `secret` |
 | `KEYCLOAK_SERVER_URL` | URL base de Keycloak | `https://auth.ejemplo.com` |
 | `KEYCLOAK_REALM` | Nombre del realm | `academico` |
 | `KEYCLOAK_CLIENT_ID` | Client ID configurado en Keycloak | `record-academico-php` |
-| `KEYCLOAK_CLIENT_SECRET` | Client Secret | `abc123...` |
 | `KEYCLOAK_REDIRECT_URI` | URL de callback tras login | `https://app.ejemplo.com/callback.php` |
 | `KEYCLOAK_ROLE_ADMIN` | Rol Keycloak con acceso de administrador | `ROLE_ADMIN` |
 | `KEYCLOAK_ROLE_USER` | Rol Keycloak con acceso de usuario | `ROLE_USER` |

@@ -24,16 +24,30 @@ class PdfService
     private bool $qrEnabled;
     private array $columnSchema;
 
-    public function __construct()
+    private RepositorioDocumentalService $repositorioDocumentalService;
+
+
+    public function __construct(
+      ?RepositorioDocumentalService $repositorioDocumentalService = null
+    )
     {
         $this->qrEnabled = ConfigService::isQrEnabled();
         $this->columnSchema = ConfigService::getColumnSchema();
         $this->pdf = new InEFPDF('P', 'mm', 'A4');
         $this->pdf->AliasNbPages();
         $this->pdf->SetAutoPageBreak(true, 25);
+
+        $this->repositorioDocumentalService =
+            $repositorioDocumentalService
+            ?? new RepositorioDocumentalService();
     }
 
-    public function generateRecord(string $cedula, array $options = []): void
+    public function generateRecord(
+      string $cedula,
+      string $accessToken,
+      string $ipOrigen,
+      array $options = []
+    ): array
     {
         $records = $this->searchByCedula($cedula);
         $startYear = $options['start_year'] ?? null;
@@ -47,9 +61,13 @@ class PdfService
         }
 
         if (empty($records)) {
-            $this->generateEmptyRecord($cedula);
-            return;
-        }
+          return $this->generateEmptyRecord(
+              cedula: $cedula,
+              accessToken: $accessToken,
+              ipOrigen: $ipOrigen,
+              options: $options
+          );
+      }
 
         $recordsByYear = [];
         foreach ($records as $record) {
@@ -78,7 +96,12 @@ class PdfService
         $this->addAcademicRecords($recordsByYear);
         $this->addCertificationText();
         $this->addSignature();
-        $this->pdf->Output('I', 'record_academico_' . $cedula . '_' . date('Ymd') . '.pdf');
+        return $this->subirPdfGenerado(
+          cedula: $cedula,
+          accessToken: $accessToken,
+          ipOrigen: $ipOrigen,
+          options: $options
+      );
     }
 
     private function searchByCedula(string $cedula): array
@@ -92,7 +115,12 @@ class PdfService
         return array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
     }
 
-    private function generateEmptyRecord(string $cedula): void
+    private function generateEmptyRecord(
+      string $cedula,
+      string $accessToken,
+      string $ipOrigen,
+      array $options = []
+    ): array
     {
         $this->pdf->AddPage();
         $this->addLetterhead();
@@ -106,7 +134,12 @@ class PdfService
         $this->pdf->SetFont('Helvetica', 'I', 12);
         $this->pdf->MultiCell(0, 8, 'No se encontraron registros en el rango especificado.', 0, 'C');
         $this->addSignature();
-        $this->pdf->Output('I', 'record_academico_' . $cedula . '_' . date('Ymd') . '.pdf');
+        return $this->subirPdfGenerado(
+          cedula: $cedula,
+          accessToken: $accessToken,
+          ipOrigen: $ipOrigen,
+          options: $options
+      );
     }
 
     private function addLetterhead(): void
@@ -358,5 +391,49 @@ class PdfService
             $this->pdf->Image($pathPng, $x, $y, $sigWidth, 0);
         }
         $this->pdf->SetAutoPageBreak(true, 25);
+    }
+
+
+    /**
+     * Convierte el documento FPDF en un string binario y lo envía
+     * al RepositorioDocumentalService.
+     *
+     * @return array<string, mixed>
+     */
+    private function subirPdfGenerado(
+        string $cedula,
+        string $accessToken,
+        string $ipOrigen,
+        array $options = []
+    ): array {
+        $nombreArchivo = sprintf(
+            'record_academico_%s_%s.pdf',
+            preg_replace('/[^0-9A-Za-z_-]/', '', $cedula),
+            date('Ymd_His')
+        );
+
+        /*
+        * S significa "String".
+        * FPDF devuelve el contenido binario del PDF sin enviarlo
+        * al navegador y sin guardarlo físicamente.
+        */
+        $contenidoPdf = $this->pdf->Output('S');
+
+        if (!is_string($contenidoPdf) || $contenidoPdf === '') {
+            throw new \RuntimeException(
+                'FPDF no pudo generar el contenido del documento.'
+            );
+        }
+
+        return $this->repositorioDocumentalService->subirPdf(
+            contenidoPdf: $contenidoPdf,
+            nombreArchivo: $nombreArchivo,
+            accessToken: $accessToken,
+            ipOrigen: $ipOrigen,
+            sistema: $options['sistema'] ?? 'SistemaRecordAcademico',
+            modulo: $options['modulo'] ?? 'ExpedienteAcademico',
+            requiereFirmado: $options['requiere_firmado'] ?? true,
+            requiereIndex: $options['requiere_index'] ?? true
+        );
     }
 }

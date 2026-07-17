@@ -42,7 +42,7 @@ echo "=== Diagnóstico de conexiones — " . date('Y-m-d H:i:s') . " ===\n\n";
 check('Variables .env cargadas', function () {
     $required = [
         'DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASS',
-        'KEYCLOAK_SERVER_URL', 'KEYCLOAK_REALM', 'KEYCLOAK_CLIENT_ID', 'KEYCLOAK_CLIENT_SECRET',
+        'KEYCLOAK_SERVER_URL', 'KEYCLOAK_REALM', 'KEYCLOAK_CLIENT_ID',
         'EXTERNAL_ROLES_DB_HOST', 'EXTERNAL_ROLES_DB_NAME', 'EXTERNAL_ROLES_DB_USER',
     ];
     $missing = array_filter($required, static fn($v) => !isset($_ENV[$v]) || $_ENV[$v] === '');
