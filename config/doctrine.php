@@ -38,10 +38,9 @@ $connectionParams = [
     'password' => $_ENV['DB_PASS'] ?? '',
     'charset'  => 'UTF-8',
     'driverOptions' => [
-        'Encrypt'                => false,
-        'TrustServerCertificate' => true,
+        'Encrypt'                => 'no',   // <- string 'no', no false
+        'TrustServerCertificate' => 'yes',  // <- string 'yes', no true
         'LoginTimeout'           => 30,
-        'CharacterSet'           => 'UTF-8',
     ],
 ];
 

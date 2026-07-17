@@ -61,13 +61,10 @@ class SecurityContext
         if ($user === null) {
             return false;
         }
-        // Se aceptan tanto roles de cliente como roles de realm, porque
-        // depende de cómo esté configurado el realm "academico" en Keycloak.
-        $roles = array_merge(
-            $user['client_roles'] ?? [],
-            $user['realm_roles'] ?? []
-        );
-        return in_array($role, $roles, true);
+        // Autorización desacoplada de Keycloak: los roles NO vienen del
+        // token (Keycloak/LDAP solo autentica), sino de la base de datos
+        // externa, resuelta por cédula. Ver RoleProvider::getRolesForCedula().
+        return in_array($role, $user['external_roles'] ?? [], true);
     }
 
     public static function redirectToKeycloak(): void
@@ -93,15 +90,28 @@ class SecurityContext
 
             $decodedAccess = self::decodeJwtPayload((string)$accessToken);
 
+            // El nombre exacto del claim con la cédula depende de cómo el
+            // administrador de Keycloak mapeó el atributo de LDAP/AD hacia
+            // el perfil del usuario (ej. "employeeID" -> claim "cedula").
+            // Configurable por si no es "cedula" literal en el token.
+            $cedulaClaim = $_ENV['KEYCLOAK_CEDULA_CLAIM'] ?? 'cedula';
+            $cedula = (string)($idToken->{$cedulaClaim} ?? $idToken->preferred_username ?? '');
+
             $user = [
                 'sub'                => $idToken->sub ?? '',
+                'cedula'             => $cedula,
                 'preferred_username' => $idToken->preferred_username ?? 'unknown',
                 'email'              => $idToken->email ?? '',
                 'given_name'         => $idToken->given_name ?? '',
                 'family_name'        => $idToken->family_name ?? '',
                 'name'               => $idToken->name ?? '',
+                // Se conservan por si en algún momento se quieren usar
+                // como fallback o para debug, pero hasRole() ya NO los usa.
                 'client_roles'       => self::extractClientRoles($decodedAccess),
                 'realm_roles'        => self::extractRealmRoles($decodedAccess),
+                // Autorización real: roles resueltos por cédula en la base
+                // externa (SQL Server distinto al de academic_records).
+                'external_roles'     => RoleProvider::getRolesForCedula($cedula),
             ];
 
             $_SESSION[self::SESSION_USER] = $user;
@@ -156,11 +166,13 @@ class SecurityContext
             $newRefreshToken = $oidc->getRefreshToken() ?? $tokens['refresh_token'];
 
             // Al refrescar el token, los roles también pueden haber cambiado
-            // (ej. un admin le quita/agrega un rol al usuario en Keycloak).
+            // en la base externa (ej. a alguien le sacan/agregan un rol).
             $decoded = self::decodeJwtPayload((string)$newAccessToken);
             if (isset($_SESSION[self::SESSION_USER])) {
                 $_SESSION[self::SESSION_USER]['client_roles'] = self::extractClientRoles($decoded);
                 $_SESSION[self::SESSION_USER]['realm_roles']  = self::extractRealmRoles($decoded);
+                $cedula = $_SESSION[self::SESSION_USER]['cedula'] ?? '';
+                $_SESSION[self::SESSION_USER]['external_roles'] = RoleProvider::getRolesForCedula($cedula);
             }
 
             $_SESSION[self::SESSION_TOKENS] = [
