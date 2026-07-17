@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace App\Entity;
@@ -6,57 +7,180 @@ namespace App\Entity;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 
-/**
- * Tabla de auditoría propia para AcademicRecord.
- *
- * Reemplaza a simplethings/entity-audit, que no tiene releases estables
- * publicados (solo dev-master, sin actualizaciones desde 2017) y exige
- * doctrine/orm ~2.5 / doctrine/dbal ~2.5, versiones incompatibles con las
- * que usa este proyecto (doctrine/orm ^2.17, doctrine/dbal ^3.7). En vez de
- * downgradear Doctrine (lo que rompería el mapeo por atributos PHP 8 de
- * AcademicRecord), se implementa un log de auditoría simple y propio.
- */
 #[ORM\Entity]
-#[ORM\Table(name: 'academic_records_audit')]
-#[ORM\Index(columns: ['record_id'], name: 'idx_audit_record_id')]
-#[ORM\Index(columns: ['created_at'], name: 'idx_audit_created_at')]
+#[ORM\Table(name: 'academic_records_AUD', schema: 'AUD')]
 class AcademicRecordAudit
 {
+    public const INSERT = 0;
+    public const UPDATE = 1;
+    public const DELETE = 2;
+
+    /*
+     * La tabla tiene clave primaria compuesta: REV + id.
+     */
+
     #[ORM\Id]
     #[ORM\Column(name: 'id', type: Types::INTEGER)]
-    #[ORM\GeneratedValue(strategy: 'IDENTITY')]
-    private ?int $id = null;
+    private int $id;
 
-    #[ORM\Column(name: 'record_id', type: Types::INTEGER)]
-    private int $recordId;
+    #[ORM\Id]
+    #[ORM\Column(name: 'REV', type: Types::INTEGER)]
+    private int $revision;
 
-    /** 'INS' | 'UPD' | 'DEL' */
-    #[ORM\Column(name: 'action', type: Types::STRING, length: 3)]
-    private string $action;
+    #[ORM\Column(name: 'REVTYPE', type: Types::SMALLINT, nullable: true)]
+    private ?int $revisionType = null;
 
-    /** Foto completa del registro (AcademicRecord::toArray()) en JSON. */
-    #[ORM\Column(name: 'payload', type: Types::TEXT)]
-    private string $payload;
+    #[ORM\Column(type: Types::STRING, length: 20, nullable: true)]
+    private ?string $cedula = null;
 
-    #[ORM\Column(name: 'username', type: Types::STRING, length: 255)]
-    private string $username;
+    #[ORM\Column(type: Types::STRING, length: 255, nullable: true)]
+    private ?string $nombre = null;
 
-    #[ORM\Column(name: 'created_at', type: Types::DATETIME_MUTABLE)]
-    private \DateTimeInterface $createdAt;
+    #[ORM\Column(type: Types::STRING, length: 255, nullable: true)]
+    private ?string $email = null;
 
-    public function __construct(int $recordId, string $action, array $payload, string $username)
+    #[ORM\Column(type: Types::STRING, length: 255, nullable: true)]
+    private ?string $materia = null;
+
+    #[ORM\Column(type: Types::DECIMAL, precision: 5, scale: 2, nullable: true)]
+    private ?string $nota = null;
+
+    #[ORM\Column(type: Types::DECIMAL, precision: 5, scale: 2, nullable: true)]
+    private ?string $total = null;
+
+    #[ORM\Column(type: Types::STRING, length: 50, nullable: true)]
+    private ?string $periodo = null;
+
+    #[ORM\Column(type: Types::INTEGER, nullable: true)]
+    private ?int $anio = null;
+
+    #[ORM\Column(type: Types::STRING, length: 10, nullable: true)]
+    private ?string $origen_tabla = null;
+
+    #[ORM\Column(type: Types::STRING, length: 100, nullable: true)]
+    private ?string $proceso = null;
+
+    #[ORM\Column(type: Types::STRING, length: 100, nullable: true)]
+    private ?string $grupo_objetivo = null;
+
+    #[ORM\Column(type: Types::STRING, length: 50, nullable: true)]
+    private ?string $modalidad = null;
+
+    #[ORM\Column(type: Types::STRING, length: 20, nullable: true)]
+    private ?string $fecha_inicio = null;
+
+    #[ORM\Column(type: Types::STRING, length: 20, nullable: true)]
+    private ?string $fecha_fin = null;
+
+    #[ORM\Column(type: Types::STRING, length: 20, nullable: true)]
+    private ?string $aprueba = null;
+
+    #[ORM\Column(type: Types::STRING, length: 1, nullable: true)]
+    private ?string $estado = null;
+
+    #[ORM\Column(type: Types::INTEGER, nullable: true)]
+    private ?int $idPersonaCrea = null;
+
+    #[ORM\Column(type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $fechaCrea = null;
+
+    #[ORM\Column(type: Types::STRING, length: 25, nullable: true)]
+    private ?string $ipCrea = null;
+
+    #[ORM\Column(type: Types::STRING, length: 50, nullable: true)]
+    private ?string $equipoCrea = null;
+
+    #[ORM\Column(type: Types::INTEGER, nullable: true)]
+    private ?int $idPersonaModifica = null;
+
+    #[ORM\Column(type: Types::DATETIME_MUTABLE, nullable: true)]
+    private ?\DateTimeInterface $fechaModifica = null;
+
+    #[ORM\Column(type: Types::STRING, length: 25, nullable: true)]
+    private ?string $ipModifica = null;
+
+    #[ORM\Column(type: Types::STRING, length: 50, nullable: true)]
+    private ?string $equipoModifica = null;
+
+    #[ORM\Column(type: Types::STRING, length: 255, nullable: true)]
+    private ?string $motivoModifica = null;
+
+    private function __construct()
     {
-        $this->recordId = $recordId;
-        $this->action = $action;
-        $this->payload = json_encode($payload, JSON_UNESCAPED_UNICODE) ?: '{}';
-        $this->username = $username;
-        $this->createdAt = new \DateTimeImmutable();
     }
 
-    public function getId(): ?int { return $this->id; }
-    public function getRecordId(): int { return $this->recordId; }
-    public function getAction(): string { return $this->action; }
-    public function getPayload(): array { return json_decode($this->payload, true) ?? []; }
-    public function getUsername(): string { return $this->username; }
-    public function getCreatedAt(): \DateTimeInterface { return $this->createdAt; }
+    public static function fromRecord(
+        AcademicRecord $record,
+        int $revision,
+        int $revisionType
+    ): self {
+        $id = $record->getId();
+
+        if ($id === null) {
+            throw new \RuntimeException(
+                'No se puede auditar un registro sin identificador.'
+            );
+        }
+
+        if (!in_array(
+            $revisionType,
+            [self::INSERT, self::UPDATE, self::DELETE],
+            true
+        )) {
+            throw new \InvalidArgumentException(
+                'El tipo de revisión no es válido.'
+            );
+        }
+
+        $audit = new self();
+
+        $audit->id = $id;
+        $audit->revision = $revision;
+        $audit->revisionType = $revisionType;
+
+        $audit->cedula = $record->getCedula();
+        $audit->nombre = $record->getNombre();
+        $audit->email = $record->getEmail();
+        $audit->materia = $record->getMateria();
+        $audit->nota = $record->getNota();
+        $audit->total = $record->getTotal();
+        $audit->periodo = $record->getPeriodo();
+        $audit->anio = $record->getAnio();
+        $audit->origen_tabla = $record->getOrigenTabla();
+        $audit->proceso = $record->getProceso();
+        $audit->grupo_objetivo = $record->getGrupoObjetivo();
+        $audit->modalidad = $record->getModalidad();
+        $audit->fecha_inicio = $record->getFechaInicio();
+        $audit->fecha_fin = $record->getFechaFin();
+        $audit->aprueba = $record->getAprueba();
+
+        $audit->estado = $record->getEstado();
+        $audit->idPersonaCrea = $record->getIdPersonaCrea();
+        $audit->fechaCrea = clone $record->getFechaCrea();
+        $audit->ipCrea = $record->getIpCrea();
+        $audit->equipoCrea = $record->getEquipoCrea();
+
+        $audit->idPersonaModifica = $record->getIdPersonaModifica();
+        $audit->fechaModifica = clone $record->getFechaModifica();
+        $audit->ipModifica = $record->getIpModifica();
+        $audit->equipoModifica = $record->getEquipoModifica();
+        $audit->motivoModifica = $record->getMotivoModifica();
+
+        return $audit;
+    }
+
+    public function getId(): int
+    {
+        return $this->id;
+    }
+
+    public function getRevision(): int
+    {
+        return $this->revision;
+    }
+
+    public function getRevisionType(): ?int
+    {
+        return $this->revisionType;
+    }
 }

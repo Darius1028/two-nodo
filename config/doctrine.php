@@ -7,10 +7,19 @@ use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\ORMSetup;
 use App\Core\AuditListener;
+use App\Doctrine\Type\SqlServerDateTimeType;
+use Doctrine\DBAL\Types\Type;
 
 // 1. Cargar variables de entorno
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
+
+if (!Type::hasType(SqlServerDateTimeType::NAME)) {
+    Type::addType(
+        SqlServerDateTimeType::NAME,
+        SqlServerDateTimeType::class
+    );
+}
 
 // 2. Configuración ORM
 $isDevMode = ($_ENV['APP_ENV'] ?? 'prod') !== 'prod';
@@ -45,19 +54,16 @@ $connectionParams = [
 ];
 
 $connection = DriverManager::getConnection($connectionParams, $ormConfig);
+
+// Doctrine serializa DATETIME2 como Y-m-d H:i:s.u. Se fija el formato de
+// la sesión para que SQL Server no lo interprete según el idioma del login.
+$connection->executeStatement('SET DATEFORMAT ymd');
+
 $entityManager = new EntityManager($connection, $ormConfig);
 
-// 4. Auditoría (listener propio, ver src/Core/AuditListener.php)
-$usernameResolver = static function (): string {
-    // No se inicia sesión si no existe (ej. corriendo bin/console.php por CLI);
-    // en ese caso se audita como 'system'.
-    if (session_status() === PHP_SESSION_NONE) {
-        return 'system';
-    }
-    return $_SESSION['keycloak_user']['preferred_username'] ?? 'system';
-};
+// 4. Auditoría institucional (listener propio, ver AuditListener.php)
+$auditListener = new AuditListener();
 
-$auditListener = new AuditListener($usernameResolver);
 $entityManager->getEventManager()->addEventListener(
     $auditListener->getSubscribedEvents(),
     $auditListener

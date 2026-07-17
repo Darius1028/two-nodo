@@ -126,6 +126,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'anio'         => $year,
                         'origen_tabla' => (string)$year,
                 ]);
+
+                $record->setAuditoriaCreacion(
+                    0,
+                    $_SERVER['REMOTE_ADDR'] ?? '',
+                    gethostname() ?: ''
+                );
                 $em->persist($record);
                 $em->flush();
                 $message = "Registro creado (ID {$record->getId()}).";
