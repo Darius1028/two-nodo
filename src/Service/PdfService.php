@@ -425,15 +425,26 @@ class PdfService
             );
         }
 
-        return $this->repositorioDocumentalService->subirPdf(
-            contenidoPdf: $contenidoPdf,
-            nombreArchivo: $nombreArchivo,
-            accessToken: $accessToken,
-            ipOrigen: $ipOrigen,
-            sistema: $options['sistema'] ?? 'SistemaRecordAcademico',
-            modulo: $options['modulo'] ?? 'ExpedienteAcademico',
-            requiereFirmado: $options['requiere_firmado'] ?? true,
-            requiereIndex: $options['requiere_index'] ?? true
-        );
+        $respuestaRepositorio =
+          $this->repositorioDocumentalService->subirPdf(
+              contenidoPdf: $contenidoPdf,
+              nombreArchivo: $nombreArchivo,
+              accessToken: $accessToken,
+              ipOrigen: $ipOrigen,
+              sistema: $options['sistema']
+                  ?? 'SistemaRecordAcademico',
+              modulo: $options['modulo']
+                  ?? 'ExpedienteAcademico',
+              requiereFirmado: $options['requiere_firmado']
+                  ?? true,
+              requiereIndex: $options['requiere_index']
+                  ?? true
+          );
+
+      return [
+          'contenido_pdf' => $contenidoPdf,
+          'nombre_archivo' => $nombreArchivo,
+          'repositorio' => $respuestaRepositorio,
+      ];
     }
 }

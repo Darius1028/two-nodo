@@ -124,11 +124,18 @@ $ipOrigen = isset($_SERVER['HTTP_X_FORWARDED_FOR'])
         : ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1');
 
 try {
-
     $ipOrigen = isset($_SERVER['HTTP_X_FORWARDED_FOR'])
         && is_string($_SERVER['HTTP_X_FORWARDED_FOR'])
-            ? trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0])
-            : (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1');
+            ? trim(
+                explode(
+                    ',',
+                    $_SERVER['HTTP_X_FORWARDED_FOR']
+                )[0]
+            )
+            : (string) (
+                $_SERVER['REMOTE_ADDR']
+                ?? '127.0.0.1'
+            );
 
     $options['sistema'] = 'SistemaRecordAcademico';
     $options['modulo'] = 'ExpedienteAcademico';
@@ -144,21 +151,43 @@ try {
         options: $options
     );
 
-    header('Content-Type: application/json; charset=utf-8');
+    $contenidoPdf = $resultado['contenido_pdf'] ?? null;
 
-    echo json_encode([
-        'success' => true,
-        'message' => 'PDF generado y subido correctamente.',
-        'repositorio' => $resultado,
-    ],
-    JSON_UNESCAPED_UNICODE
-    | JSON_UNESCAPED_SLASHES
-    | JSON_PRETTY_PRINT
+    $nombreArchivo = basename(
+        (string) (
+            $resultado['nombre_archivo']
+            ?? 'record_academico.pdf'
+        )
     );
 
+    if (
+        !is_string($contenidoPdf)
+        || $contenidoPdf === ''
+    ) {
+        throw new RuntimeException(
+            'El servicio no devolvió el contenido del PDF.'
+        );
+    }
+
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+
+    header('Content-Type: application/pdf');
+    header(
+        'Content-Disposition: inline; filename="' .
+        $nombreArchivo .
+        '"'
+    );
+    header('Content-Length: ' . strlen($contenidoPdf));
+    header('Cache-Control: private, no-store, max-age=0');
+    header('Pragma: no-cache');
+    header('X-Content-Type-Options: nosniff');
+
+    echo $contenidoPdf;
     exit;
 } catch (Throwable $e) {
-    if (ob_get_level() > 0) {
+    while (ob_get_level() > 0) {
         ob_end_clean();
     }
 
@@ -168,13 +197,16 @@ try {
     );
 
     http_response_code(500);
-    header('Content-Type: application/json; charset=utf-8');
+    header('Content-Type: text/plain; charset=utf-8');
 
-    echo json_encode([
-        'success' => false,
-        'message' => 'Error generando o subiendo el PDF.',
-        'error' => $e->getMessage(),
-    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    $appDebug = filter_var(
+        $_ENV['APP_DEBUG'] ?? false,
+        FILTER_VALIDATE_BOOL
+    );
+
+    echo $appDebug
+        ? 'Error generando el PDF: ' . $e->getMessage()
+        : 'No se pudo generar el documento PDF.';
 
     exit;
 }

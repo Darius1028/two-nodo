@@ -81,10 +81,15 @@ function e($v): string {
             const iframe = document.getElementById('pdfIframe');
             if (iframe) {
                 iframe.src = 'PdfGenerator.php?cedula_query=' + cedula
-                    + '&start=' + start + '&end=' + end
-                    + '&name=' + nombre + '&email=' + email
-                    + '&periodo=' + periodo + '&extra1=' + extra1 + '&extra2=' + extra2
-                    + '#toolbar=1';
+                  + '&start=' + start
+                  + '&end=' + end
+                  + '&name=' + nombre
+                  + '&email=' + email
+                  + '&periodo=' + periodo
+                  + '&extra1=' + extra1
+                  + '&extra2=' + extra2
+                  + '&_=' + Date.now()
+                  + '#toolbar=1';
                 iframe.style.display = 'block';
                 document.getElementById('emptyState').style.display = 'none';
             }
