@@ -6,7 +6,6 @@ $dotenv->safeLoad();
 
 use App\Security\SecurityContext;
 use App\Service\PdfService;
-use App\Service\KeycloakTokenService;
 
 if (ob_get_level() > 0) ob_end_clean();
 
@@ -14,10 +13,13 @@ if (ob_get_level() > 0) ob_end_clean();
 // directamente (vivía junto al resto de la app). Ahora que public/ es el
 // document root de Nginx, cualquiera podía pedir el PDF de cualquier cédula
 // sin loguearse. Se aplica la misma política de acceso que workspace.php.
-/* SecurityContext::ensureSession();
+SecurityContext::ensureSession();
 if (($_ENV['WORKSPACE_ACCESS_MODE'] ?? 'protected') === 'protected') {
-    SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'ROLE_USER');
-} */
+    #SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'ROLE_USER');
+    SecurityContext::requireAuthentication();
+} else {
+    SecurityContext::requireAuthentication();
+}
 
 /*
  * Obtener cédula.
@@ -97,26 +99,22 @@ $options = [
 ];
 
 /*
- * Debes usar la clave exacta donde tu autenticación
- * guarda el access token.
+ * Reutilizar el access token del usuario autenticado. SecurityContext también
+ * lo refresca cuando ha expirado y conserva la sesión actualizada.
  */
-$accessToken = isset($_SESSION['access_token'])
-    && is_string($_SESSION['access_token'])
-        ? trim($_SESSION['access_token'])
-        : '';
+$accessToken = SecurityContext::getAccessToken();
 
-if ($accessToken === '') {
+if ($accessToken === null) {
     http_response_code(401);
     header('Content-Type: application/json; charset=utf-8');
 
     echo json_encode([
         'success' => false,
-        'message' => 'No se encontró el access token en la sesión.',
+        'message' => 'La sesión no contiene un access token válido.',
     ], JSON_UNESCAPED_UNICODE);
 
     exit;
 }
-
 /*
  * IP de origen.
  */
@@ -126,13 +124,6 @@ $ipOrigen = isset($_SERVER['HTTP_X_FORWARDED_FOR'])
         : ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1');
 
 try {
-
-    $tokenService = new KeycloakTokenService();
-
-    /*
-    * Token técnico generado mediante client_credentials.
-    */
-    $accessToken = $tokenService->obtenerAccessToken();
 
     $ipOrigen = isset($_SERVER['HTTP_X_FORWARDED_FOR'])
         && is_string($_SERVER['HTTP_X_FORWARDED_FOR'])

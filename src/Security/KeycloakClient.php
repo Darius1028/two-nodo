@@ -71,6 +71,10 @@ class KeycloakClient
          */
         self::$instance->setCodeChallengeMethod('S256');
 
+        // Cliente público: el token endpoint recibe client_id + PKCE, sin
+        // client_secret ni cabecera HTTP Basic.
+        self::$instance->setTokenEndpointAuthMethodsSupported(['none']);
+
         self::$instance->addScope([
             'openid',
             'profile',

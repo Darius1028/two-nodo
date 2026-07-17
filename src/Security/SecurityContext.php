@@ -33,6 +33,21 @@ class SecurityContext
         return $_SESSION[self::SESSION_USER];
     }
 
+    public static function getAccessToken(): ?string
+    {
+        if (self::getCurrentUser() === null) {
+            return null;
+        }
+
+        $accessToken = $_SESSION[self::SESSION_TOKENS]['access_token'] ?? null;
+
+        if (!is_string($accessToken) || trim($accessToken) === '') {
+            return null;
+        }
+
+        return trim($accessToken);
+    }
+
     public static function requireAuthentication(): array
     {
         $user = self::getCurrentUser();
@@ -119,7 +134,7 @@ class SecurityContext
                 'access_token'  => $accessToken,
                 'refresh_token' => $refreshToken,
                 'id_token'      => $oidc->getIdToken(),
-                'expires_at'    => time() + (($idToken->exp ?? time()) - time()),
+                'expires_at'    => (int) ($decodedAccess['exp'] ?? ($idToken->exp ?? time())),
             ];
 
             $returnTo = $_SESSION['return_to'] ?? 'workspace.php';
@@ -179,7 +194,7 @@ class SecurityContext
                 'access_token'  => $newAccessToken,
                 'refresh_token' => $newRefreshToken,
                 'id_token'      => $oidc->getIdToken(),
-                'expires_at'    => time() + 300,
+                'expires_at'    => (int) ($decoded['exp'] ?? (time() + 300)),
             ];
             return true;
         } catch (\Throwable $e) {
