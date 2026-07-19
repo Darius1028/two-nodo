@@ -5,6 +5,7 @@ $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
 
 use App\Core\EntityManagerProvider;
+use App\Core\RequestContext;
 use App\Entity\AcademicRecord;
 use App\Security\SecurityContext;
 use App\Service\ConfigService;
@@ -12,7 +13,7 @@ use App\Service\CsvService;
 use App\Service\ErrorFinder;
 
 SecurityContext::ensureSession();
-/* SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ROLE_ADMIN'); */
+SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO');
 $currentUser = SecurityContext::getCurrentUser();
 
 function csrfToken(): string {
@@ -95,6 +96,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'fecha_fin'      => trim((string)($_POST['edit_fin']    ?? '')),
                         'aprueba'        => trim((string)($_POST['edit_aprueba'] ?? '')),
                 ]);
+                $record->setAuditoriaModificacion(
+                        SecurityContext::getCurrentUserId() ?? 0,
+                        RequestContext::getClientIp(),
+                        RequestContext::getClientHostname(),
+                        trim((string)($_POST['edit_motivo'] ?? ''))
+                );
                 $em->flush();
                 $message = 'Registro actualizado.';
                 $messageType = 'success';
@@ -128,9 +135,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ]);
 
                 $record->setAuditoriaCreacion(
-                    0,
-                    $_SERVER['REMOTE_ADDR'] ?? '',
-                    gethostname() ?: ''
+                        SecurityContext::getCurrentUserId() ?? 0,
+                        RequestContext::getClientIp(),
+                        RequestContext::getClientHostname()
                 );
                 $em->persist($record);
                 $em->flush();
@@ -203,6 +210,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // Data para la vista
+$config = ConfigService::get();
 $em = EntityManagerProvider::get();
 $years = ErrorFinder::getAvailableYears();
 $schema = ConfigService::getColumnSchema();
@@ -213,7 +221,7 @@ $page    = max(1, (int)($_GET['page'] ?? 1));
 $perPage = 10;
 $offset  = ($page - 1) * $perPage;
 
-$allowed = ['cedula','nombre','email','materia','proceso','origen_tabla','grupo_objetivo','modalidad'];
+$allowed = ['cedula','nombre','email','materia','proceso','origen_tabla','grupo_objetivo','modalidad','nota','total','fecha_inicio','fecha_fin','aprueba'];
 $records = [];
 $totalRecords = 0;
 
@@ -264,22 +272,36 @@ $csrf = csrfToken();
         input[type="text"], input[type="password"], input[type="number"], select { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
         .btn { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; font-size: 14px; text-decoration: none; display: inline-block; }
         .btn-primary { background: #003366; color: white; }
+        .btn-primary:hover { background: #002244; }
         .btn-secondary { background: #6c757d; color: white; }
+        .btn-secondary:hover { background: #5a6268; }
         .btn-danger { background: #dc3545; color: white; }
+        .btn-danger:hover { background: #c82333; }
         .btn-sm { padding: 6px 12px; font-size: 12px; }
         .table-container { overflow-x: auto; margin-top: 15px; }
-        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; white-space: nowrap; }
         th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; }
         th { background: #f8f9fa; font-weight: 600; }
         .badge-year { background: #e7f1ff; color: #003366; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; }
         .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #e1e5eb; }
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
         .modal.active { display: flex; }
-        .modal-content { background: white; padding: 25px; border-radius: 8px; max-width: 800px; width: 90%; }
+        .modal-content { background: white; padding: 25px; border-radius: 8px; max-width: 800px; width: 90%; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
+        .modal-sm { max-width: 400px; text-align: center; }
+        .builder-toolbar { background: #eef2f7; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 15px; align-items: center; }
+        .sortable-item { display: flex; align-items: center; gap: 10px; padding: 12px; background: white; border: 1px solid #ddd; border-radius: 6px; margin-bottom: 8px; cursor: grab; }
+        .sortable-item .label-input { flex: 1; border: 1px solid #ccc; padding: 6px 10px; border-radius: 4px; }
+        .sortable-item .width-input { width: 80px; text-align: center; }
+        .del-btn { background: none; border: none; color: #dc3545; font-size: 16px; cursor: pointer; }
+        .schema-message { padding: 6px 12px; border-radius: 4px; background: #fff5f5; border: 1px solid #f5c6cb; font-size: 13px; transition: opacity 0.3s; }
+        .schema-message.show { display: block !important; opacity: 1; }
+        .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; }
         .pagination { display: flex; gap: 5px; justify-content: center; margin-top: 20px; }
         .pagination a, .pagination span { padding: 8px 14px; border: 1px solid #ddd; border-radius: 4px; text-decoration: none; color: #333; }
         .pagination .active { background: #003366; color: white; border-color: #003366; }
+        .pagination span { background: transparent; border: none; color: #666; }
     </style>
     <script>
         function searchRecords() {
@@ -295,7 +317,95 @@ $csrf = csrfToken();
             if (tabContent && tabBtn) {
                 tabContent.classList.add('active');
                 tabBtn.classList.add('active');
+                const url = new URL(window.location);
+                url.searchParams.set('tab', tab);
+                window.history.pushState({}, '', url);
             }
+        }
+        function confirmDeleteYear(event) {
+            event.preventDefault();
+            document.getElementById('deleteConfirmModal').classList.add('active');
+            return false;
+        }
+        function executeDeleteYear() {
+            document.getElementById('deleteYearForm').submit();
+        }
+        let dragSrcEl = null;
+        function handleDragStart(e) { dragSrcEl = this; e.dataTransfer.effectAllowed = 'move'; }
+        function handleDrop(e) {
+            if (dragSrcEl !== this) {
+                let items = [...document.querySelectorAll('.sortable-item')];
+                let srcIdx = items.indexOf(dragSrcEl), targetIdx = items.indexOf(this);
+                if (srcIdx < targetIdx) this.after(dragSrcEl); else this.before(dragSrcEl);
+            }
+            updateSchemaJson();
+            return false;
+        }
+        function attachDragEvents(item) {
+            item.addEventListener('dragstart', handleDragStart);
+            item.addEventListener('dragover', e => e.preventDefault());
+            item.addEventListener('drop', handleDrop);
+            item.querySelector('.label-input').addEventListener('input', updateSchemaJson);
+            item.querySelector('.width-input').addEventListener('input', updateSchemaJson);
+            item.querySelector('.visible-checkbox').addEventListener('change', updateSchemaJson);
+        }
+        function updateSchemaJson() {
+            let schema = [];
+            document.querySelectorAll('.sortable-item').forEach(item => {
+                schema.push({
+                    key: item.dataset.key,
+                    label: item.querySelector('.label-input').value,
+                    width: parseFloat(item.querySelector('.width-input').value) || 20,
+                    visible: item.querySelector('.visible-checkbox').checked
+                });
+            });
+            document.getElementById('schema_json').value = JSON.stringify(schema);
+        }
+        function addNewColumn() {
+            const select = document.getElementById('newColSelect');
+            const key = select.value;
+            const label = select.options[select.selectedIndex].text;
+            const msgContainer = document.getElementById('schemaMessage');
+            msgContainer.textContent = '';
+            msgContainer.classList.remove('show');
+            msgContainer.style.display = 'none';
+            msgContainer.style.color = '#dc3545';
+            msgContainer.style.background = '#fff5f5';
+            msgContainer.style.borderColor = '#f5c6cb';
+            if (document.querySelector('li[data-key="' + CSS.escape(key) + '"]')) {
+                msgContainer.textContent = '⚠️ Esta columna ya está agregada.';
+                msgContainer.style.display = 'block';
+                msgContainer.classList.add('show');
+                setTimeout(() => {
+                    msgContainer.classList.remove('show');
+                    setTimeout(() => { msgContainer.style.display = 'none'; }, 300);
+                }, 4000);
+                return;
+            }
+            const li = document.createElement('li');
+            li.className = 'sortable-item';
+            li.draggable = true;
+            li.dataset.key = key;
+            const uniqueId = 'vis_' + Date.now() + Math.random().toString(36).substring(2, 5);
+            li.innerHTML = '<div class="drag-handle">☰</div>'
+                + '<input type="checkbox" class="visible-checkbox" id="' + uniqueId + '" checked aria-label="Visible">'
+                + '<span style="min-width:100px;font-family:monospace;">[' + key + ']</span>'
+                + '<input type="text" class="label-input" value="' + label + '" aria-label="Etiqueta de columna">'
+                + '<input type="number" class="width-input" value="25" aria-label="Ancho en mm"><span>mm</span>'
+                + '<button type="button" class="del-btn" onclick="this.parentElement.remove(); updateSchemaJson();">❌</button>';
+            document.getElementById('sortableSchema').appendChild(li);
+            attachDragEvents(li);
+            updateSchemaJson();
+            msgContainer.textContent = '✅ Columna añadida correctamente.';
+            msgContainer.style.color = '#155724';
+            msgContainer.style.background = '#d4edda';
+            msgContainer.style.borderColor = '#c3e6cb';
+            msgContainer.style.display = 'block';
+            msgContainer.classList.add('show');
+            setTimeout(() => {
+                msgContainer.classList.remove('show');
+                setTimeout(() => { msgContainer.style.display = 'none'; }, 300);
+            }, 3000);
         }
         function openEditModal(record) {
             document.getElementById('edit_id').value = record.id;
@@ -319,6 +429,8 @@ $csrf = csrfToken();
             const tab = new URLSearchParams(window.location.search).get('tab') || 'records';
             showTab(tab);
             document.querySelectorAll('.nav-tab').forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.tab)));
+            document.querySelectorAll('.sortable-item').forEach(attachDragEvents);
+            updateSchemaJson();
         });
     </script>
 </head>
@@ -339,40 +451,67 @@ $csrf = csrfToken();
 
     <div class="tab-content active" id="tab-records">
         <div style="display:flex;gap:15px;margin-bottom:20px;align-items:flex-end;flex-wrap:wrap;background:#fff;padding:15px;border:1px solid #ddd;border-radius:8px;">
-            <div class="form-group" style="width:250px;margin:0;">
-                <label for="searchColumn">Buscar por</label>
+            <div class="form-group" style="width:250px; margin:0;">
+                <label for="searchColumn">Buscar por (Filtro de Columna)</label>
                 <select id="searchColumn">
-                    <option value="cedula">Cédula</option>
-                    <option value="nombre">Nombre</option>
-                    <option value="email">Email</option>
-                    <option value="materia">Materia</option>
+                    <option value="cedula" <?= $searchColumn === 'cedula' ? 'selected' : '' ?>>Cédula</option>
+                    <option value="nombre" <?= $searchColumn === 'nombre' ? 'selected' : '' ?>>Nombre Completo</option>
+                    <option value="origen_tabla" <?= $searchColumn === 'origen_tabla' ? 'selected' : '' ?>>Año de Expediente</option>
+                    <option value="email" <?= $searchColumn === 'email' ? 'selected' : '' ?>>Email</option>
+                    <option value="materia" <?= $searchColumn === 'materia' ? 'selected' : '' ?>>Materia / Curso</option>
+                    <option value="proceso" <?= $searchColumn === 'proceso' ? 'selected' : '' ?>>Proceso</option>
+                    <option value="grupo_objetivo" <?= $searchColumn === 'grupo_objetivo' ? 'selected' : '' ?>>Grupo Objetivo</option>
+                    <option value="modalidad" <?= $searchColumn === 'modalidad' ? 'selected' : '' ?>>Modalidad</option>
+                    <option value="nota" <?= $searchColumn === 'nota' ? 'selected' : '' ?>>Nota / Horas</option>
+                    <option value="total" <?= $searchColumn === 'total' ? 'selected' : '' ?>>Total</option>
+                    <option value="fecha_inicio" <?= $searchColumn === 'fecha_inicio' ? 'selected' : '' ?>>Fecha de Inicio</option>
+                    <option value="fecha_fin" <?= $searchColumn === 'fecha_fin' ? 'selected' : '' ?>>Fecha de Fin</option>
+                    <option value="aprueba" <?= $searchColumn === 'aprueba' ? 'selected' : '' ?>>Aprueba (SI/NO)</option>
                 </select>
             </div>
-            <div class="form-group" style="flex:1;margin:0;">
-                <label for="searchTerm">Término</label>
-                <input type="text" id="searchTerm" value="<?= e($searchTerm) ?>" onkeypress="if(event.key==='Enter')searchRecords();">
+            <div class="form-group" style="flex:1; margin:0;">
+                <label for="searchTerm">Término de búsqueda</label>
+                <input type="text" id="searchTerm" value="<?= e($searchTerm) ?>" placeholder="Escriba el valor a buscar..." onkeypress="if(event.key === 'Enter') searchRecords();">
             </div>
             <button class="btn btn-primary" onclick="searchRecords()">Buscar</button>
             <button type="button" class="btn btn-secondary" onclick="document.getElementById('newRecordModal').classList.add('active')">+ Nuevo Registro</button>
+            <?php if ($searchTerm !== ''): ?>
+                <a href="?tab=records" class="btn btn-secondary">Mostrar Todos</a>
+            <?php endif; ?>
         </div>
+        <?php if ($searchTerm !== ''): ?>
+            <div class="alert alert-success" style="padding:8px 12px; font-size:13px;">
+                Se encontraron <?= count($records) ?> coincidencias para "<strong><?= e($searchTerm) ?></strong>".
+            </div>
+        <?php endif; ?>
         <div class="table-container">
             <table>
                 <thead>
-                <tr><th>Año</th><th>Cédula</th><th>Nombre</th><th>Materia</th><th>Nota</th><th>Total</th><th>Acción</th></tr>
+                <tr>
+                    <th>Año</th>
+                    <th>Cédula</th><th>Nombre</th><th>Proceso</th><th>Materia</th><th>Grupo Obj.</th>
+                    <th>Modalidad</th><th>Inicio</th><th>Fin</th><th>Nota</th><th>Total</th><th>Aprueba</th><th>Acción</th>
+                </tr>
                 </thead>
                 <tbody>
                 <?php if (empty($records)): ?>
-                    <tr><td colspan="7" style="text-align:center;">No se encontraron registros.</td></tr>
+                    <tr><td colspan="13" style="text-align:center;">No se encontraron registros.</td></tr>
                 <?php else: foreach ($records as $r): ?>
                     <tr>
                         <td><span class="badge-year"><?= e($r['origen_tabla'] ?? '') ?></span></td>
                         <td><?= e($r['cedula'] ?? '') ?></td>
                         <td><strong><?= e($r['nombre'] ?? '') ?></strong></td>
-                        <td><?= e($r['materia'] ?? '') ?></td>
+                        <td><?= e($r['proceso'] ?? '') ?></td>
+                        <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;"><?= e($r['materia'] ?? '') ?></td>
+                        <td><?= e($r['grupo_objetivo'] ?? '') ?></td>
+                        <td><?= e($r['modalidad'] ?? '') ?></td>
+                        <td><?= e($r['fecha_inicio'] ?? '') ?></td>
+                        <td><?= e($r['fecha_fin'] ?? '') ?></td>
                         <td><?= e($r['nota'] ?? '') ?></td>
                         <td><?= e($r['total'] ?? '') ?></td>
-                        <td style="white-space:nowrap;">
-                            <button class="btn btn-primary btn-sm" onclick='openEditModal(<?= json_encode($r, JSON_HEX_APOS | JSON_HEX_QUOT) ?>)'>Editar</button>
+                        <td><?= e($r['aprueba'] ?? '') ?></td>
+                        <td>
+                            <button class="btn btn-primary btn-sm" onclick='openEditModal(<?= json_encode($r, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?>)'>Editar</button>
                             <form action="?tab=records" method="POST" style="display:inline;" onsubmit="return confirm('¿Eliminar este registro (cédula <?= e($r['cedula'] ?? '') ?>)?');">
                                 <input type="hidden" name="action" value="delete_record">
                                 <input type="hidden" name="csrf_token" value="<?= e($csrf) ?>">
@@ -385,11 +524,41 @@ $csrf = csrfToken();
                 </tbody>
             </table>
         </div>
-        <?php if ($totalPages > 1): ?>
+
+        <?php if ($totalPages > 1 && $searchTerm === ''): ?>
             <div class="pagination">
-                <?php for ($p = 1; $p <= $totalPages; $p++): ?>
+                <?php if ($page > 1): ?>
+                    <a href="?tab=records&page=1">&laquo; Primera</a>
+                    <a href="?tab=records&page=<?= $page - 1 ?>">&lsaquo; Anterior</a>
+                <?php endif; ?>
+
+                <?php
+                $rango = 2;
+                $inicio = max(1, $page - $rango);
+                $fin = min($totalPages, $page + $rango);
+                if ($fin - $inicio < 4) {
+                    if ($inicio == 1) {
+                        $fin = min($totalPages, $inicio + 4);
+                    } elseif ($fin == $totalPages) {
+                        $inicio = max(1, $fin - 4);
+                    }
+                }
+                if ($inicio > 1) {
+                    echo '<span>…</span>';
+                }
+                for ($p = $inicio; $p <= $fin; $p++):
+                    ?>
                     <a href="?tab=records&page=<?= $p ?>" class="<?= $p == $page ? 'active' : '' ?>"><?= $p ?></a>
-                <?php endfor; ?>
+                <?php endfor;
+                if ($fin < $totalPages) {
+                    echo '<span>…</span>';
+                }
+                ?>
+
+                <?php if ($page < $totalPages): ?>
+                    <a href="?tab=records&page=<?= $page + 1 ?>">Siguiente &rsaquo;</a>
+                    <a href="?tab=records&page=<?= $totalPages ?>">Última &raquo;</a>
+                <?php endif; ?>
             </div>
         <?php endif; ?>
     </div>
@@ -410,12 +579,12 @@ $csrf = csrfToken();
                 </form>
             </div>
             <div class="card" style="border:1px solid #f5c6cb;background:#fff5f5;">
-                <h3 style="color:#dc3545;">Eliminar Año</h3>
-                <form action="?tab=import" method="POST" onsubmit="return confirm('¿Eliminar todos los registros del año?');">
+                <h3 style="color:#dc3545;">Limpiar Año (Borrado Masivo)</h3>
+                <form id="deleteYearForm" action="?tab=import" method="POST" onsubmit="return confirmDeleteYear(event);">
                     <input type="hidden" name="action" value="delete_year_db">
                     <input type="hidden" name="csrf_token" value="<?= e($csrf) ?>">
                     <div class="form-group">
-                        <label for="delete_year">Año</label>
+                        <label for="delete_year">Seleccione el año a vaciar</label>
                         <select id="delete_year" name="delete_year" required>
                             <option value="">--</option>
                             <?php foreach ($years as $y): ?>
@@ -423,7 +592,7 @@ $csrf = csrfToken();
                             <?php endforeach; ?>
                         </select>
                     </div>
-                    <button type="submit" class="btn btn-danger">Eliminar</button>
+                    <button type="submit" class="btn btn-danger">Eliminar Registros</button>
                 </form>
             </div>
         </div>
@@ -486,41 +655,153 @@ $csrf = csrfToken();
 
     <div class="tab-content" id="tab-schema">
         <div class="card">
-            <h3>Editor de Esquema PDF</h3>
-            <p>Configuración actual:</p>
-            <pre><?= e(json_encode($schema, JSON_PRETTY_PRINT)) ?></pre>
+            <h3>Constructor Visual de Columnas PDF</h3>
+            <div class="builder-toolbar">
+                <label for="newColSelect" class="visually-hidden">Seleccionar columna</label>
+                <select id="newColSelect" style="max-width: 250px;">
+                    <option value="proceso">Proceso</option>
+                    <option value="materia">Curso (Materia)</option>
+                    <option value="grupo_objetivo">Grupo Objetivo</option>
+                    <option value="modalidad">Modalidad</option>
+                    <option value="nota">Nro. de Horas (Nota)</option>
+                    <option value="fecha_inicio">Fecha Inicio</option>
+                    <option value="fecha_fin">Fecha Fin</option>
+                    <option value="total">Total</option>
+                    <option value="aprueba">Aprueba</option>
+                    <option value="periodo">Año (Periodo/Rango)</option>
+                </select>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="addNewColumn()">Añadir a la Tabla</button>
+                <div id="schemaMessage" class="schema-message" role="alert" style="display:none; color:#dc3545; font-weight:500; margin-left:15px;"></div>
+            </div>
+
+            <ul class="sortable-list" id="sortableSchema" style="margin-top:20px;">
+                <?php foreach ($schema as $col): ?>
+                    <?php
+                    $key = $col['key'] ?? $col['field'] ?? '';
+                    $uniqueId = 'vis_' . $key . '_' . uniqid();
+                    ?>
+                    <li class="sortable-item" draggable="true" data-key="<?= e($key) ?>">
+                        <div class="drag-handle">☰</div>
+                        <input type="checkbox" class="visible-checkbox" id="<?= e($uniqueId) ?>" <?= ($col['visible'] ?? true) ? 'checked' : '' ?> aria-label="Visible">
+                        <span style="min-width:100px;font-family:monospace;">[<?= e($key) ?>]</span>
+                        <input type="text" class="label-input" value="<?= e($col['label'] ?? '') ?>" aria-label="Etiqueta de columna">
+                        <input type="number" class="width-input" value="<?= e($col['width'] ?? 20) ?>" aria-label="Ancho en mm"><span>mm</span>
+                        <button type="button" class="del-btn" onclick="this.parentElement.remove(); updateSchemaJson();">❌</button>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+
+            <form action="?tab=schema" method="POST" style="margin-top:20px;">
+                <input type="hidden" name="action" value="save_schema">
+                <input type="hidden" name="csrf_token" value="<?= e($csrf) ?>">
+                <input type="hidden" name="schema_json" id="schema_json">
+                <button type="submit" class="btn btn-primary" onclick="updateSchemaJson()">Guardar Estructura</button>
+            </form>
         </div>
     </div>
 </div>
 
 <div class="modal" id="editModal">
     <div class="modal-content">
-        <h3 style="color:#003366;margin-bottom:15px;">Editar Registro</h3>
+        <div class="modal-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+            <h3 style="margin:0; color:#003366;">Modificar Registro Extendido</h3>
+            <button class="close-modal" onclick="closeModal('editModal')" style="border:none; background:none; font-size:24px; cursor:pointer;">&times;</button>
+        </div>
         <form action="?tab=records" method="POST">
             <input type="hidden" name="action" value="update_record">
             <input type="hidden" name="csrf_token" value="<?= e($csrf) ?>">
             <input type="hidden" name="edit_id" id="edit_id">
-            <div class="form-group">
-                <label>Cédula</label>
-                <input type="text" id="edit_cedula" readonly>
+
+            <div class="grid-2">
+                <div class="form-group">
+                    <label for="edit_cedula">Cédula</label>
+                    <input type="text" id="edit_cedula" readonly style="background:#eee;">
+                </div>
+                <div class="form-group">
+                    <label for="edit_nombre">Nombre Completo</label>
+                    <input type="text" name="edit_nombre" id="edit_nombre" required>
+                </div>
             </div>
+
             <div class="form-group">
-                <label>Nombre</label>
-                <input type="text" name="edit_nombre" id="edit_nombre" required>
-            </div>
-            <div class="form-group">
-                <label>Materia</label>
+                <label for="edit_materia">Materia / Curso</label>
                 <input type="text" name="edit_materia" id="edit_materia" required>
             </div>
-            <div class="form-group">
-                <label>Email</label>
+
+            <div class="grid-3">
+                <div class="form-group">
+                    <label for="edit_proceso">Proceso</label>
+                    <input type="text" name="edit_proceso" id="edit_proceso">
+                </div>
+                <div class="form-group">
+                    <label for="edit_grupo">Grupo Objetivo</label>
+                    <input type="text" name="edit_grupo" id="edit_grupo">
+                </div>
+                <div class="form-group">
+                    <label for="edit_modalidad">Modalidad</label>
+                    <input type="text" name="edit_modalidad" id="edit_modalidad">
+                </div>
+            </div>
+
+            <div class="grid-3">
+                <div class="form-group">
+                    <label for="edit_inicio">Fecha Inicio</label>
+                    <input type="text" name="edit_inicio" id="edit_inicio" placeholder="Ej: 01/01/2014">
+                </div>
+                <div class="form-group">
+                    <label for="edit_fin">Fecha Fin</label>
+                    <input type="text" name="edit_fin" id="edit_fin">
+                </div>
+                <div class="form-group">
+                    <label for="edit_aprueba">Aprueba</label>
+                    <input type="text" name="edit_aprueba" id="edit_aprueba">
+                </div>
+            </div>
+
+            <div class="grid-3">
+                <div class="form-group">
+                    <label for="edit_nota">Nro. Horas (Nota)</label>
+                    <input type="number" name="edit_nota" id="edit_nota" step="0.01">
+                </div>
+                <div class="form-group">
+                    <label for="edit_total">Total Calificación</label>
+                    <input type="number" name="edit_total" id="edit_total" step="0.01">
+                </div>
+                <div class="form-group">
+                    <label for="edit_periodo">Periodo (Año)</label>
+                    <input type="text" name="edit_periodo" id="edit_periodo">
+                </div>
+            </div>
+
+            <div class="form-group" style="margin-top:10px;">
+                <label for="edit_email">Email</label>
                 <input type="text" name="edit_email" id="edit_email">
             </div>
-            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:15px;">
+
+            <div class="form-group" style="margin-top:10px;">
+                <label for="edit_motivo">Motivo de la modificación</label>
+                <input type="text" name="edit_motivo" id="edit_motivo" maxlength="250" required>
+            </div>
+
+            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:15px;border-top:1px solid #eee;padding-top:15px;">
                 <button type="button" class="btn btn-secondary" onclick="closeModal('editModal')">Cancelar</button>
-                <button type="submit" class="btn btn-primary">Guardar</button>
+                <button type="submit" class="btn btn-primary">Guardar Cambios</button>
             </div>
         </form>
+    </div>
+</div>
+
+<div class="modal" id="deleteConfirmModal">
+    <div class="modal-content modal-sm">
+        <h3 style="color:#dc3545; margin-bottom: 15px;">⚠️ Confirmar Borrado Masivo</h3>
+        <p style="margin-bottom: 20px; color:#555;">
+            ¿Estás completamente seguro que deseas <strong>ELIMINAR TODOS</strong> los registros del año seleccionado? <br><br>
+            <span style="color:#dc3545; font-weight:bold;">Esta acción no se puede deshacer.</span>
+        </p>
+        <div style="display:flex; gap:10px; justify-content:center;">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('deleteConfirmModal')">Cancelar</button>
+            <button type="button" class="btn btn-danger" onclick="executeDeleteYear()">Sí, Eliminar Registros</button>
+        </div>
     </div>
 </div>
 

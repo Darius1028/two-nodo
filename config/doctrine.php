@@ -47,9 +47,13 @@ $connectionParams = [
     'password' => $_ENV['DB_PASS'] ?? '',
     'charset'  => 'UTF-8',
     'driverOptions' => [
-        'Encrypt'                => 'no',   // <- string 'no', no false
-        'TrustServerCertificate' => 'yes',  // <- string 'yes', no true
-        'LoginTimeout'           => 30,
+        // FIX: DB_ENCRYPT/DB_LOGIN_TIMEOUT estaban declaradas en .env.example
+        // pero nunca se leían -- quedaban siempre hardcodeadas sin importar
+        // el entorno, contradiciendo el README ("en producción configurar
+        // Encrypt=true").
+        'Encrypt'                => filter_var($_ENV['DB_ENCRYPT'] ?? 'false', FILTER_VALIDATE_BOOLEAN) ? 'yes' : 'no',
+        'TrustServerCertificate' => 'yes',
+        'LoginTimeout'           => (int)($_ENV['DB_LOGIN_TIMEOUT'] ?? 30),
     ],
 ];
 

@@ -3,8 +3,6 @@ declare(strict_types=1);
 
 namespace App\Security;
 
-use Jumbojett\OpenIDConnectClientException;
-
 class SecurityContext
 {
     private const SESSION_USER   = 'keycloak_user';
@@ -41,6 +39,17 @@ class SecurityContext
         }
         self::redirectToKeycloak();
         exit;
+    }
+
+    /**
+     * id numérico de ADM.Usuario del usuario logueado, para usar en
+     * AcademicRecord::setAuditoriaCreacion()/setAuditoriaModificacion().
+     * Puede ser null si no se pudo resolver.
+     */
+    public static function getCurrentUserId(): ?int
+    {
+        $user = self::getCurrentUser();
+        return $user['idUsuario'] ?? null;
     }
 
     public static function requireRole(string $role): void
@@ -95,7 +104,18 @@ class SecurityContext
             // el perfil del usuario (ej. "employeeID" -> claim "cedula").
             // Configurable por si no es "cedula" literal en el token.
             $cedulaClaim = $_ENV['KEYCLOAK_CEDULA_CLAIM'] ?? 'cedula';
-            $cedula = (string)($idToken->{$cedulaClaim} ?? $idToken->preferred_username ?? '');
+            $rawCedula = (string)($idToken->{$cedulaClaim} ?? $idToken->preferred_username ?? '');
+
+            // FIX: LDAP/AD puede entregar la cédula con guion
+            // ("050287128-8"), mientras que ADM.Persona.identificacion la
+            // guarda sin separadores ("0502871288"). Sin normalizar, el
+            // join en RoleProvider nunca encuentra la fila y el usuario
+            // queda siempre sin roles, sin ningún error visible.
+            // Si al sacar todo lo que no es dígito queda vacío (ej. cuando
+            // cae al fallback de preferred_username y ese no es numérico),
+            // se conserva el valor original tal cual.
+            $cedulaDigits = preg_replace('/\D+/', '', $rawCedula);
+            $cedula = $cedulaDigits !== '' ? $cedulaDigits : $rawCedula;
 
             $user = [
                 'sub'                => $idToken->sub ?? '',
@@ -109,9 +129,19 @@ class SecurityContext
                 // como fallback o para debug, pero hasRole() ya NO los usa.
                 'client_roles'       => self::extractClientRoles($decodedAccess),
                 'realm_roles'        => self::extractRealmRoles($decodedAccess),
-                // Autorización real: roles resueltos por cédula en la base
-                // externa (SQL Server distinto al de academic_records).
-                'external_roles'     => RoleProvider::getRolesForCedula($cedula),
+                // Autorización real: roles resueltos por cédula O username
+                // en la base externa (lo que primero coincida).
+                'external_roles'     => RoleProvider::getRolesForUser(
+                    $cedula,
+                    (string)($idToken->preferred_username ?? '')
+                ),
+                // id numérico de ADM.Usuario -- necesario para
+                // idPersonaCrea/idPersonaModifica en la auditoría
+                // institucional.
+                'idUsuario'          => RoleProvider::getUsuarioId(
+                    $cedula,
+                    (string)($idToken->preferred_username ?? '')
+                ),
             ];
 
             $_SESSION[self::SESSION_USER] = $user;
@@ -126,11 +156,46 @@ class SecurityContext
             unset($_SESSION['return_to']);
             header('Location: ' . $returnTo);
             exit;
-        } catch (OpenIDConnectClientException $e) {
+        } catch (\Throwable $e) {
+            // El detalle técnico solo va al log del servidor -- el usuario
+            // final ve una pantalla genérica, nunca el mensaje crudo de la
+            // excepción (podría filtrar detalles de configuración interna).
             error_log('Keycloak callback error: ' . $e->getMessage());
-            http_response_code(401);
-            exit('Error de autenticación: ' . $e->getMessage());
+            self::clearSession();
+            self::renderLoginFailedPage();
         }
+    }
+
+    private static function renderLoginFailedPage(): never
+    {
+        http_response_code(401);
+        header('Content-Type: text/html; charset=utf-8');
+        ?>
+        <!DOCTYPE html>
+        <html lang="es">
+        <head>
+            <meta charset="UTF-8">
+            <title>No se pudo iniciar sesión</title>
+            <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; color: #333; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+                .box { background: white; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); padding: 40px; max-width: 420px; text-align: center; }
+                .box span { font-size: 48px; }
+                h1 { color: #003366; font-size: 1.3rem; margin: 15px 0 10px; }
+                p { color: #666; font-size: 14px; line-height: 1.5; margin-bottom: 25px; }
+                a { display: inline-block; background: #003366; color: white; text-decoration: none; padding: 10px 24px; border-radius: 6px; font-size: 14px; font-weight: 600; }
+            </style>
+        </head>
+        <body>
+        <div class="box">
+            <span>🔒</span>
+            <h1>No se pudo iniciar sesión</h1>
+            <p>Ocurrió un problema al validar tus credenciales. Verificá tu usuario y contraseña, o intentá nuevamente en unos minutos. Si el problema continúa, contactá al área de soporte técnico.</p>
+            <a href="login.php">Volver a intentar</a>
+        </div>
+        </body>
+        </html>
+        <?php
+        exit;
     }
 
     public static function logout(): void
@@ -172,7 +237,8 @@ class SecurityContext
                 $_SESSION[self::SESSION_USER]['client_roles'] = self::extractClientRoles($decoded);
                 $_SESSION[self::SESSION_USER]['realm_roles']  = self::extractRealmRoles($decoded);
                 $cedula = $_SESSION[self::SESSION_USER]['cedula'] ?? '';
-                $_SESSION[self::SESSION_USER]['external_roles'] = RoleProvider::getRolesForCedula($cedula);
+                $username = $_SESSION[self::SESSION_USER]['preferred_username'] ?? '';
+                $_SESSION[self::SESSION_USER]['external_roles'] = RoleProvider::getRolesForUser($cedula, $username);
             }
 
             $_SESSION[self::SESSION_TOKENS] = [

@@ -10,9 +10,9 @@ use App\Security\SecurityContext;
 
 SecurityContext::ensureSession();
 
-/* if (($_ENV['WORKSPACE_ACCESS_MODE'] ?? 'protected') === 'protected') {
-    SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'ROLE_USER');
-} */
+if (($_ENV['WORKSPACE_ACCESS_MODE'] ?? 'protected') === 'protected') {
+    SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');
+}
 $currentUser = SecurityContext::getCurrentUser();
 
 $searchCedula = isset($_GET['cedula']) && is_string($_GET['cedula']) ? trim($_GET['cedula']) : '';
@@ -89,6 +89,50 @@ function e($v): string {
                 document.getElementById('emptyState').style.display = 'none';
             }
         }
+
+        // Acción EXPLÍCITA y separada de la vista previa -- archiva (con
+        // firma digital) el PDF en el Repositorio Documental institucional.
+        // Nunca se dispara automáticamente al mirar un expediente.
+        async function archivarEnRepositorio() {
+            const boton = document.getElementById('btnArchivar');
+            const cedula = document.getElementById('override_cedula').value;
+            if (!cedula) {
+                alert('Ingresá una cédula primero.');
+                return;
+            }
+            if (!confirm('¿Archivar y firmar este expediente en el Repositorio Documental institucional? Esta acción genera un documento oficial.')) {
+                return;
+            }
+            boton.disabled = true;
+            boton.textContent = 'Archivando…';
+            try {
+                const response = await fetch('api.php?action=archive_pdf', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        cedula: cedula,
+                        start_year: document.getElementById('start_year').value,
+                        end_year: document.getElementById('end_year').value,
+                        name: document.getElementById('override_nombre').value,
+                        email: document.getElementById('override_email').value,
+                        periodo: document.getElementById('override_periodo').value,
+                        extra1: document.getElementById('override_extra1').value,
+                        extra2: document.getElementById('override_extra2').value,
+                    }),
+                });
+                const data = await response.json();
+                if (data.success) {
+                    alert('PDF archivado correctamente en el Repositorio Documental.');
+                } else {
+                    alert('Error al archivar: ' + (data.error || 'error desconocido'));
+                }
+            } catch (err) {
+                alert('Error de red al archivar: ' + err.message);
+            } finally {
+                boton.disabled = false;
+                boton.textContent = '📁 Archivar en Repositorio Documental';
+            }
+        }
     </script>
 </head>
 <body>
@@ -154,6 +198,7 @@ function e($v): string {
                         <input type="text" id="override_extra2" placeholder="Ej: Modalidad Regular">
                     </div>
                     <button type="button" class="btn btn-success" onclick="requestPdfReload()">⚡ Generar PDF</button>
+                    <button type="button" id="btnArchivar" class="btn btn-primary" style="margin-top:8px;" onclick="archivarEnRepositorio()">📁 Archivar en Repositorio Documental</button>
                 </div>
             <?php endif; ?>
         </div>

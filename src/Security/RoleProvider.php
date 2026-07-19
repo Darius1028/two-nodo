@@ -7,16 +7,21 @@ use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\DriverManager;
 
 /**
- * Resuelve los roles de un usuario contra una base de datos externa
- * (SQL Server distinto al de academic_records), cruzando por cédula.
+ * Resuelve los roles de un usuario contra la base institucional
+ * PORTAL_APLICATIVOS_CJ (esquema ADM), cruzando por cédula O por username
+ * (lo que primero coincida) -- porque Keycloak/LDAP puede entregar la
+ * cédula con un formato distinto al de la base (con guion vs. sin guion),
+ * o en algunos casos puede no traer el claim de cédula bien mapeado y solo
+ * tener disponible el username de AD.
  *
- * Usa una conexión DBAL propia y liviana -- no un EntityManager -- porque
- * no necesitamos mapear entidades de una base que no es "nuestra" ni
- * administramos su esquema, solo leer una tabla de roles.
- *
- * IMPORTANTE: ajustar EXTERNAL_ROLES_TABLE / EXTERNAL_ROLES_CEDULA_COLUMN /
- * EXTERNAL_ROLES_ROLE_COLUMN en el .env para que coincidan con el nombre
- * real de la tabla y columnas en esa base externa.
+ * Esquema real (compartido entre varias apps institucionales):
+ *   Persona.identificacion       -> cédula
+ *   Usuario.idPersona            -> FK a Persona
+ *   Usuario.username/usernameSatje -> usuario de red / de otro sistema
+ *   UsuarioRol.idUsuario         -> FK a Usuario
+ *   UsuarioRol.idRol             -> FK a Rol
+ *   Rol.idAplicativo             -> FK a Aplicativo (filtra los roles de
+ *                                   ESTA app dentro de la tabla compartida)
  */
 class RoleProvider
 {
@@ -37,8 +42,8 @@ class RoleProvider
                 'password'      => $_ENV['EXTERNAL_ROLES_DB_PASS'] ?? '',
                 'charset'       => 'UTF-8',
                 'driverOptions' => [
-                    'Encrypt'                => 'no',   // <- string 'no', no false
-                    'TrustServerCertificate' => 'yes',  // <- string 'yes', no true
+                    'Encrypt'                => 'no',
+                    'TrustServerCertificate' => 'yes',
                     'LoginTimeout'           => 15,
                 ],
             ]);
@@ -46,40 +51,104 @@ class RoleProvider
         return self::$connection;
     }
 
-    /**
-     * @return string[] Lista de roles del usuario según la BD externa
-     *                   (ej. ['ROLE_ADMIN', 'ROLE_USER']). Vacío si no
-     *                   tiene roles asignados o si la consulta falla.
-     */
-    public static function getRolesForCedula(string $cedula): array
+    private static function normalizeCedula(string $cedula): string
     {
-        if ($cedula === '') {
+        $digits = preg_replace('/\D+/', '', $cedula);
+        return $digits !== '' ? $digits : $cedula;
+    }
+
+    /**
+     * @return string[] Lista de nombres de rol (ADM.Rol.nombre) que el
+     *                   usuario tiene asignados para esta aplicación
+     *                   (EXTERNAL_ROLES_APP_ALIAS), buscando por cédula O
+     *                   por username -- lo que primero coincida.
+     */
+    public static function getRolesForUser(string $cedula, string $username = ''): array
+    {
+        $cedula = self::normalizeCedula($cedula);
+        if ($cedula === '' && $username === '') {
             return [];
         }
 
-        // Nombres configurables porque no controlamos el esquema de esta
-        // base externa -- ajustar en .env según cómo esté modelada
-        // realmente la tabla de roles.
-        $table       = $_ENV['EXTERNAL_ROLES_TABLE']         ?? 'usuario_roles';
-        $cedulaCol   = $_ENV['EXTERNAL_ROLES_CEDULA_COLUMN'] ?? 'cedula';
-        $roleCol     = $_ENV['EXTERNAL_ROLES_ROLE_COLUMN']   ?? 'rol';
+        $appAlias = $_ENV['EXTERNAL_ROLES_APP_ALIAS'] ?? '';
+        if ($appAlias === '') {
+            error_log('RoleProvider: falta EXTERNAL_ROLES_APP_ALIAS en el .env.');
+            return [];
+        }
 
         try {
             $conn = self::getConnection();
-            $sql = sprintf(
-                'SELECT DISTINCT %s AS rol FROM %s WHERE %s = :cedula',
-                $roleCol,
-                $table,
-                $cedulaCol
-            );
-            $rows = $conn->executeQuery($sql, ['cedula' => $cedula])->fetchFirstColumn();
+            $sql = <<<SQL
+                SELECT DISTINCT r.nombre AS rol
+                FROM ADM.Usuario u
+                LEFT JOIN ADM.Persona p ON p.id = u.idPersona
+                JOIN ADM.UsuarioRol ur ON ur.idUsuario = u.id
+                JOIN ADM.Rol r        ON r.id = ur.idRol
+                JOIN ADM.Aplicativo a ON a.id = r.idAplicativo
+                WHERE (
+                    (:cedula   <> '' AND p.identificacion = :cedula)
+                    OR (:username <> '' AND u.username      = :username)
+                    OR (:username <> '' AND u.usernameSatje  = :username)
+                )
+                AND a.alias = :appAlias
+                AND ur.estado = 'ACT'
+                AND (ur.fechaFin IS NULL OR ur.fechaFin > GETDATE())
+                SQL;
+
+            $rows = $conn->executeQuery($sql, [
+                'cedula'   => $cedula,
+                'username' => $username,
+                'appAlias' => $appAlias,
+            ])->fetchFirstColumn();
+
             return array_values(array_filter(array_map(
                 static fn($r) => trim((string)$r),
                 $rows
             )));
         } catch (\Throwable $e) {
-            error_log('RoleProvider: error consultando roles externos para cédula ' . $cedula . ': ' . $e->getMessage());
+            error_log('RoleProvider: error consultando roles para cédula=' . $cedula . ' username=' . $username . ': ' . $e->getMessage());
             return [];
         }
+    }
+
+    /**
+     * Resuelve el id numérico de ADM.Usuario (para idPersonaCrea /
+     * idPersonaModifica en la auditoría institucional), buscando por
+     * cédula O username -- mismo criterio que getRolesForUser().
+     */
+    public static function getUsuarioId(string $cedula, string $username = ''): ?int
+    {
+        $cedula = self::normalizeCedula($cedula);
+        if ($cedula === '' && $username === '') {
+            return null;
+        }
+
+        try {
+            $conn = self::getConnection();
+            $sql = <<<SQL
+                SELECT TOP 1 u.id
+                FROM ADM.Usuario u
+                LEFT JOIN ADM.Persona p ON p.id = u.idPersona
+                WHERE (:cedula   <> '' AND p.identificacion = :cedula)
+                   OR (:username <> '' AND u.username        = :username)
+                   OR (:username <> '' AND u.usernameSatje    = :username)
+                SQL;
+
+            $id = $conn->executeQuery($sql, [
+                'cedula'   => $cedula,
+                'username' => $username,
+            ])->fetchOne();
+
+            return $id !== false ? (int)$id : null;
+        } catch (\Throwable $e) {
+            error_log('RoleProvider: error resolviendo idUsuario para cédula=' . $cedula . ' username=' . $username . ': ' . $e->getMessage());
+            return null;
+        }
+    }
+
+    /** @deprecated usar getRolesForUser() -- se deja por compatibilidad. */
+    public static function getRolesForCedula(string $cedula): array
+    {
+        return self::getRolesForUser($cedula, '');
     }
 }

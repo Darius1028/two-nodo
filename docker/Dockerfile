@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl gnupg2 ca-certificates apt-transport-https unixodbc unixodbc-dev \
         g++ make autoconf git unzip \
         libfreetype6-dev libjpeg62-turbo-dev libpng-dev \
+        libcurl4-openssl-dev \
     # FIX: apt en Debian 12 (bookworm) ya no confía en claves .asc puestas
     # directo en /etc/apt/trusted.gpg.d (error "NO_PUBKEY EB3E94ADBE1229CF").
     # Hay que convertir la clave a formato binario con gpg --dearmor y
@@ -22,7 +23,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update \
     && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 mssql-tools18 \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install gd pdo \
+    # FIX: "curl" de apt es solo el comando de línea de comandos -- la
+    # extensión PHP (curl_init, curl_setopt_array, etc. que usan
+    # KeycloakTokenService y RepositorioDocumentalService) es otra cosa y
+    # no viene compilada por defecto en la imagen. Hay que compilarla
+    # explícitamente con docker-php-ext-install.
+    && docker-php-ext-install gd pdo curl \
     # FIX: "pecl install sqlsrv pdo_sqlsrv" sin versión trae siempre la
     # última release (5.12.0+), que dejó de soportar PHP 8.2 y exige 8.3+
     # ("pecl/sqlsrv requires PHP >= 8.3.0"). Se fija 5.11.1, la última

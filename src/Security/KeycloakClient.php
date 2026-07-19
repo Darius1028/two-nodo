@@ -1,5 +1,4 @@
 <?php
-
 declare(strict_types=1);
 
 namespace App\Security;
@@ -17,67 +16,40 @@ class KeycloakClient
             return self::$instance;
         }
 
-        $serverUrl = trim((string) getenv('KEYCLOAK_SERVER_URL'));
-        $realm = trim((string) getenv('KEYCLOAK_REALM'));
-        $clientId = trim((string) getenv('KEYCLOAK_CLIENT_ID'));
-        $redirectUri = trim((string) getenv('KEYCLOAK_REDIRECT_URI'));
-        $appEnv = trim((string) (getenv('APP_ENV') ?: 'prod'));
+        $serverUrl    = trim((string)($_ENV['KEYCLOAK_SERVER_URL']     ?? ''));
+        $realm        = trim((string)($_ENV['KEYCLOAK_REALM']         ?? ''));
+        $clientId     = trim((string)($_ENV['KEYCLOAK_CLIENT_ID']     ?? ''));
+        $clientSecret = trim((string)($_ENV['KEYCLOAK_CLIENT_SECRET'] ?? ''));
+        $redirectUri  = trim((string)($_ENV['KEYCLOAK_REDIRECT_URI']  ?? ''));
+        $appEnv       = trim((string)($_ENV['APP_ENV'] ?? 'prod'));
 
         if ($serverUrl === '') {
-            throw new RuntimeException(
-                'KEYCLOAK_SERVER_URL no está configurado.'
-            );
+            throw new RuntimeException('KEYCLOAK_SERVER_URL no está configurado.');
         }
-
         if ($realm === '') {
-            throw new RuntimeException(
-                'KEYCLOAK_REALM no está configurado.'
-            );
+            throw new RuntimeException('KEYCLOAK_REALM no está configurado.');
         }
-
         if ($clientId === '') {
-            throw new RuntimeException(
-                'KEYCLOAK_CLIENT_ID no está configurado.'
-            );
+            throw new RuntimeException('KEYCLOAK_CLIENT_ID no está configurado.');
         }
-
         if ($redirectUri === '') {
-            throw new RuntimeException(
-                'KEYCLOAK_REDIRECT_URI no está configurado.'
-            );
+            throw new RuntimeException('KEYCLOAK_REDIRECT_URI no está configurado.');
         }
 
-        $issuer = sprintf(
-            '%s/realms/%s',
-            rtrim($serverUrl, '/'),
-            rawurlencode($realm)
-        );
+        $issuer = sprintf('%s/realms/%s', rtrim($serverUrl, '/'), rawurlencode($realm));
 
-        /*
-         * Cliente público:
-         * no se envía client secret.
-         */
-        self::$instance = new OpenIDConnectClient(
-            $issuer,
-            $clientId,
-            null
-        );
+        if ($clientSecret !== '') {
+            // Cliente CONFIDENCIAL (tu caso: cj-cliente-prueba tiene
+            // "Client Authenticator: Client Id and Secret" en Keycloak).
+            self::$instance = new OpenIDConnectClient($issuer, $clientId, $clientSecret);
+        } else {
+            // Cliente PÚBLICO: sin secreto, protegido con PKCE.
+            self::$instance = new OpenIDConnectClient($issuer, $clientId, '');
+            self::$instance->setCodeChallengeMethod('S256');
+        }
 
-        self::$instance->setRedirectURL($redirectUri);
-
-        /*
-         * PKCE protege el intercambio del authorization code
-         * cuando el cliente no utiliza secreto.
-         */
-        self::$instance->setCodeChallengeMethod('S256');
-
-        self::$instance->addScope([
-            'openid',
-            'profile',
-            'email',
-        ]);
-
-        self::$instance->setTimeout(30);
+        self::$instance->addScope(['openid', 'profile', 'email']);
+        self::$instance->setTimeOut(30);
 
         if ($appEnv !== 'prod') {
             self::$instance->setVerifyHost(false);

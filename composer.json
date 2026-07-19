@@ -4,6 +4,7 @@
   "type": "project",
   "require": {
     "php": ">=8.2",
+    "ext-curl": "*",
     "doctrine/dbal": "^3.7",
     "doctrine/migrations": "^3.7",
     "doctrine/orm": "^2.17",

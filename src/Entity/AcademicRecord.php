@@ -97,7 +97,10 @@ class AcademicRecord
     #[ORM\Column(type: Types::STRING, length: 50)]
     private string $equipoModifica = '';
 
-    #[ORM\Column(type: Types::STRING, length: 255)]
+    // FIX: la columna real academic_records.motivoModifica es varchar(250),
+    // no 255 -- con 255 el ORM permite escribir 251-255 caracteres que
+    // SQL Server rechaza con "String or binary data would be truncated".
+    #[ORM\Column(type: Types::STRING, length: 250)]
     private string $motivoModifica = '';
 
     public function __construct()
@@ -266,7 +269,7 @@ class AcademicRecord
         $this->fechaModifica = new \DateTime();
         $this->ipModifica = mb_substr(trim($ip), 0, 25);
         $this->equipoModifica = mb_substr(trim($equipo), 0, 50);
-        $this->motivoModifica = mb_substr(trim($motivo), 0, 255);
+        $this->motivoModifica = mb_substr(trim($motivo), 0, 250);
     }
 
     public function setEstado(string $estado): void

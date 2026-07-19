@@ -7,11 +7,14 @@ $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
 
 use App\Core\EntityManagerProvider;
+use App\Core\RequestContext;
 use App\Entity\AcademicRecord;
 use App\Security\SecurityContext;
 use App\Service\ConfigService;
 use App\Service\CsvService;
 use App\Service\ErrorFinder;
+use App\Service\KeycloakTokenService;
+use App\Service\PdfService;
 
 SecurityContext::ensureSession();
 
@@ -60,7 +63,7 @@ $requireAdminJson = static function () use ($respond): array {
     if ($user === null) {
         $respond(['success' => false, 'error' => 'Not authenticated'], 401);
     }
-    $adminRole = $_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ROLE_ADMIN';
+    $adminRole = $_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO';
     if (!SecurityContext::hasRole($adminRole)) {
         $respond(['success' => false, 'error' => 'Forbidden'], 403);
     }
@@ -154,6 +157,11 @@ try {
                 'anio'         => $year,
                 'origen_tabla' => (string)$year,
             ]);
+            $record->setAuditoriaCreacion(
+                SecurityContext::getCurrentUserId() ?? 0,
+                RequestContext::getClientIp(),
+                RequestContext::getClientHostname()
+            );
             $em->persist($record);
             $em->flush();
             CsvService::logHistory('Alta Manual', "Registro creado para cédula $cedula (año $year).");
@@ -181,6 +189,12 @@ try {
                 'total'   => isset($input['total']) && $input['total'] !== '' ? $input['total'] : null,
                 'periodo' => $getString($input, 'periodo'),
             ]);
+            $record->setAuditoriaModificacion(
+                SecurityContext::getCurrentUserId() ?? 0,
+                RequestContext::getClientIp(),
+                RequestContext::getClientHostname(),
+                $getString($input, 'motivo')
+            );
             $em->flush();
             $respond(['success' => true]);
 
@@ -207,7 +221,7 @@ try {
             $respond(['success' => true, 'years' => ErrorFinder::getAvailableYears()]);
 
         case 'check_errors':
-            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ROLE_ADMIN');
+            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO');
             $year = $getInt($_GET, 'year', $getInt($input, 'year', (int)date('Y')));
             $type = $getString($_GET, 'type', $getString($input, 'type'));
             if ($type !== '') {
@@ -223,7 +237,7 @@ try {
             $respond(['success' => true, 'year' => $year, 'count' => count($errors), 'errors' => $errors]);
 
         case 'error_summary':
-            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ROLE_ADMIN');
+            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO');
             $yearParam = $_GET['year'] ?? $input['year'] ?? null;
             $summary = $yearParam !== null
                 ? ErrorFinder::getErrorSummary((int)$yearParam)
@@ -252,7 +266,7 @@ try {
             $respond(CsvService::validateCSV($_FILES['csv_file']['tmp_name']));
 
         case 'export_csv':
-            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ROLE_ADMIN');
+            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO');
             $year   = $getInt($_GET, 'year', $getInt($input, 'year', (int)date('Y')));
             $cedula = $getString($_GET, 'cedula', $getString($input, 'cedula'));
             $outputPath = sys_get_temp_dir() . "/export_{$year}_" . date('YmdHis') . '.csv';
@@ -273,7 +287,7 @@ try {
             $respond(['success' => true, 'config' => $config]);
 
         case 'get_history':
-            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ROLE_ADMIN');
+            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO');
             $limit = max(1, min(500, $getInt($_GET, 'limit', 50)));
             $respond(['success' => true, 'history' => CsvService::getHistory($limit)]);
 
@@ -296,6 +310,59 @@ try {
                 'record_count' => $count,
                 'pdf_url'      => 'PdfGenerator.php?cedula_query=' . urlencode($cedula),
             ]);
+
+        // Acción EXPLÍCITA y separada de la vista previa: genera el PDF y
+        // lo archiva (con firma digital) en el Repositorio Documental
+        // institucional. Nunca se dispara solo por mirar un expediente.
+        case 'archive_pdf':
+            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');
+            if ($method !== 'POST') {
+                $respond(['success' => false, 'error' => METHOD_NOT_ALLOWED], 405);
+            }
+            $cedula = $getString($input, 'cedula');
+            if ($cedula === '') {
+                $respond(['success' => false, 'error' => 'Cedula required'], 400);
+            }
+            $startYear = $getInt($input, 'start_year', 2010);
+            $endYear   = $getInt($input, 'end_year', (int)date('Y'));
+
+            try {
+                $tokenService = new KeycloakTokenService();
+                $accessToken = $tokenService->obtenerAccessToken();
+
+                $options = [
+                    'start_year'       => $startYear,
+                    'end_year'         => $endYear,
+                    'override_name'    => $getString($input, 'name')    ?: null,
+                    'override_email'   => $getString($input, 'email')   ?: null,
+                    'override_periodo' => $getString($input, 'periodo') ?: null,
+                    'extra1'           => $getString($input, 'extra1')  ?: null,
+                    'extra2'           => $getString($input, 'extra2')  ?: null,
+                    'sistema'          => 'SistemaRecordAcademico',
+                    'modulo'           => 'ExpedienteAcademico',
+                    'requiere_firmado' => true,
+                    'requiere_index'   => true,
+                ];
+
+                $pdfService = new PdfService();
+                $resultado = $pdfService->generateAndArchive(
+                    cedula: $cedula,
+                    accessToken: $accessToken,
+                    ipOrigen: RequestContext::getClientIp(),
+                    options: $options
+                );
+
+                CsvService::logHistory('Archivo Documental', "PDF de cédula $cedula archivado en el Repositorio Documental.");
+
+                $respond([
+                    'success'     => true,
+                    'message'     => 'PDF generado y archivado correctamente.',
+                    'repositorio' => $resultado,
+                ]);
+            } catch (\Throwable $e) {
+                error_log('Error archivando PDF en Repositorio Documental: ' . $e->getMessage());
+                $respond(['success' => false, 'error' => $e->getMessage()], 500);
+            }
 
         default:
             $respond([

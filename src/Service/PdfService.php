@@ -18,18 +18,27 @@ class InEFPDF extends FPDF
     }
 }
 
+/**
+ * Genera el PDF de expediente académico. Tiene dos usos DISTINTOS y
+ * DELIBERADAMENTE SEPARADOS:
+ *
+ *  - generateRecord()     -> vista previa, se envía inline al navegador.
+ *                            No toca el Repositorio Documental.
+ *  - generateAndArchive() -> genera Y archiva (con firma) en el
+ *                            Repositorio Documental institucional.
+ *                            Requiere un access token de servicio.
+ *
+ * Mantenerlos separados es intencional: "ver un expediente" no debe
+ * disparar por sí solo un archivo firmado en el repositorio institucional.
+ */
 class PdfService
 {
     private InEFPDF $pdf;
     private bool $qrEnabled;
     private array $columnSchema;
+    private ?RepositorioDocumentalService $repositorioDocumentalService;
 
-    private RepositorioDocumentalService $repositorioDocumentalService;
-
-
-    public function __construct(
-      ?RepositorioDocumentalService $repositorioDocumentalService = null
-    )
+    public function __construct(?RepositorioDocumentalService $repositorioDocumentalService = null)
     {
         $this->qrEnabled = ConfigService::isQrEnabled();
         $this->columnSchema = ConfigService::getColumnSchema();
@@ -37,17 +46,38 @@ class PdfService
         $this->pdf->AliasNbPages();
         $this->pdf->SetAutoPageBreak(true, 25);
 
-        $this->repositorioDocumentalService =
-            $repositorioDocumentalService
-            ?? new RepositorioDocumentalService();
+        // Lazy a propósito: si nunca se llama a generateAndArchive(), no
+        // hace falta que REPOSITORIO_DOCUMENTAL_URL esté configurado para
+        // simplemente previsualizar un PDF con generateRecord().
+        $this->repositorioDocumentalService = $repositorioDocumentalService;
     }
 
-    public function generateRecord(
-      string $cedula,
-      string $accessToken,
-      string $ipOrigen,
-      array $options = []
-    ): array
+    /**
+     * Vista previa: genera el PDF y lo envía inline al navegador.
+     */
+    public function generateRecord(string $cedula, array $options = []): void
+    {
+        $this->buildPdf($cedula, $options);
+        $this->pdf->Output('I', 'record_academico_' . $cedula . '_' . date('Ymd') . '.pdf');
+    }
+
+    /**
+     * Genera el PDF y lo archiva (con firma digital) en el Repositorio
+     * Documental institucional.
+     *
+     * @return array<string, mixed>
+     */
+    public function generateAndArchive(
+        string $cedula,
+        string $accessToken,
+        string $ipOrigen,
+        array $options = []
+    ): array {
+        $this->buildPdf($cedula, $options);
+        return $this->subirPdfGenerado($cedula, $accessToken, $ipOrigen, $options);
+    }
+
+    private function buildPdf(string $cedula, array $options): void
     {
         $records = $this->searchByCedula($cedula);
         $startYear = $options['start_year'] ?? null;
@@ -61,13 +91,9 @@ class PdfService
         }
 
         if (empty($records)) {
-          return $this->generateEmptyRecord(
-              cedula: $cedula,
-              accessToken: $accessToken,
-              ipOrigen: $ipOrigen,
-              options: $options
-          );
-      }
+            $this->buildEmptyRecord($cedula);
+            return;
+        }
 
         $recordsByYear = [];
         foreach ($records as $record) {
@@ -96,12 +122,6 @@ class PdfService
         $this->addAcademicRecords($recordsByYear);
         $this->addCertificationText();
         $this->addSignature();
-        return $this->subirPdfGenerado(
-          cedula: $cedula,
-          accessToken: $accessToken,
-          ipOrigen: $ipOrigen,
-          options: $options
-      );
     }
 
     private function searchByCedula(string $cedula): array
@@ -115,12 +135,7 @@ class PdfService
         return array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
     }
 
-    private function generateEmptyRecord(
-      string $cedula,
-      string $accessToken,
-      string $ipOrigen,
-      array $options = []
-    ): array
+    private function buildEmptyRecord(string $cedula): void
     {
         $this->pdf->AddPage();
         $this->addLetterhead();
@@ -134,12 +149,6 @@ class PdfService
         $this->pdf->SetFont('Helvetica', 'I', 12);
         $this->pdf->MultiCell(0, 8, 'No se encontraron registros en el rango especificado.', 0, 'C');
         $this->addSignature();
-        return $this->subirPdfGenerado(
-          cedula: $cedula,
-          accessToken: $accessToken,
-          ipOrigen: $ipOrigen,
-          options: $options
-      );
     }
 
     private function addLetterhead(): void
@@ -393,7 +402,6 @@ class PdfService
         $this->pdf->SetAutoPageBreak(true, 25);
     }
 
-
     /**
      * Convierte el documento FPDF en un string binario y lo envía
      * al RepositorioDocumentalService.
@@ -412,20 +420,17 @@ class PdfService
             date('Ymd_His')
         );
 
-        /*
-        * S significa "String".
-        * FPDF devuelve el contenido binario del PDF sin enviarlo
-        * al navegador y sin guardarlo físicamente.
-        */
+        // S significa "String": FPDF devuelve el contenido binario del PDF
+        // sin enviarlo al navegador y sin guardarlo físicamente.
         $contenidoPdf = $this->pdf->Output('S');
 
         if (!is_string($contenidoPdf) || $contenidoPdf === '') {
-            throw new \RuntimeException(
-                'FPDF no pudo generar el contenido del documento.'
-            );
+            throw new \RuntimeException('FPDF no pudo generar el contenido del documento.');
         }
 
-        return $this->repositorioDocumentalService->subirPdf(
+        $repositorio = $this->repositorioDocumentalService ?? new RepositorioDocumentalService();
+
+        return $repositorio->subirPdf(
             contenidoPdf: $contenidoPdf,
             nombreArchivo: $nombreArchivo,
             accessToken: $accessToken,
