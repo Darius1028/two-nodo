@@ -14,35 +14,33 @@ services:
       - app-network
 
   php-app:
+    image: academic-php:8.2-dev
+
     build:
       context: .
       dockerfile: docker/Dockerfile
+
     container_name: academic_php
+
     volumes:
+      # El código se actualiza sin reconstruir la imagen.
       - .:/var/www/html
-      # FIX: /vendor está en .gitignore y no existe en el host tras un clone
-      # limpio. Sin este volumen nombrado, el bind mount de arriba (".:/var/www/html")
-      # tapa el vendor/ instalado durante el build de la imagen y la app
-      # revienta con "vendor/autoload.php not found". Este volumen "gana" sobre
-      # el bind mount solo para esa subcarpeta, preservando lo instalado en la imagen.
+
+      # Conserva vendor dentro de Docker.
       - vendor_data:/var/www/html/vendor
+
+      # Datos temporales de Symfony/aplicación.
       - var_data:/var/www/html/var
+
     env_file:
       - .env
+
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      # FIX: Keycloak corre en el Windows host (localhost:8080 desde el
-      # navegador). El discovery document de OIDC devuelve las URLs de
-      # authorization_endpoint/token_endpoint usando el mismo host con el
-      # que se le pidió el discovery. Si el contenedor pide con
-      # "host.docker.internal", esas URLs quedan con ese hostname y el
-      # NAVEGADOR no puede resolverlo al hacer el redirect de login.
-      # Solución: usar un hostname único ("auth.local") que resuelva a
-      # Keycloak tanto desde el navegador (vía hosts file de Windows) como
-      # desde el contenedor (vía este extra_hosts). Ver KEYCLOAK_SERVER_URL
-      # en .env.
       - "auth.local:host-gateway"
+
     restart: unless-stopped
+
     networks:
       - app-network
 
