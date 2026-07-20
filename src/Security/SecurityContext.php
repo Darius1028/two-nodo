@@ -94,15 +94,62 @@ class SecurityContext
     public static function redirectToKeycloak(): void
     {
         self::ensureSession();
-        $_SESSION['return_to'] = $_SERVER['REQUEST_URI'] ?? 'workspace.php';
-        $oidc = KeycloakClient::get();
-        $oidc->setRedirectURL($_ENV['KEYCLOAK_REDIRECT_URI'] ?? '');
-        $oidc->authenticate();
+
+        // FIX: si quien llama a esto es login.php o callback.php mismos
+        // (por ejemplo, login.php invocado directo como el botón "Volver a
+        // intentar"), REQUEST_URI apunta a esa misma página -- guardarla
+        // como return_to arma un loop infinito: login.php -> Keycloak ->
+        // callback.php -> vuelve a login.php -> Keycloak -> ... Estas dos
+        // páginas nunca son un destino final válido, así que se filtran acá
+        // sin importar desde dónde se invoque redirectToKeycloak().
+        $requestUri = (string)($_SERVER['REQUEST_URI'] ?? '');
+        $requestPath = parse_url($requestUri, PHP_URL_PATH) ?? '';
+        $invalidReturnTargets = ['login.php', 'callback.php'];
+        $isInvalidReturnTarget = in_array(basename($requestPath), $invalidReturnTargets, true);
+
+        $_SESSION['return_to'] = ($requestUri !== '' && !$isInvalidReturnTarget)
+                ? $requestUri
+                : 'workspace.php';
+
+        try {
+            $oidc = KeycloakClient::get();
+            $oidc->setRedirectURL($_ENV['KEYCLOAK_REDIRECT_URI'] ?? '');
+            $oidc->authenticate();
+        } catch (\Throwable $e) {
+            // Keycloak caído/inalcanzable, mal configurado, etc. Sin este
+            // catch, la excepción de la librería OIDC (con rutas de
+            // servidor y stack trace) se mostraba directo al usuario final.
+            error_log('Keycloak redirect error: ' . $e->getMessage());
+            self::renderLoginFailedPage();
+        }
     }
 
     public static function handleCallback(): void
     {
         self::ensureSession();
+
+        // Guard contra doble canje del mismo código de autorización -- se
+        // mantiene como red de seguridad aunque la causa raíz del loop era
+        // otra (ver redirectToKeycloak()): un código de autorización solo
+        // se puede canjear una vez: si esta request repite un código que ya
+        // canjeamos con éxito, no se vuelve a pegar contra Keycloak con un
+        // código quemado -- se redirige directo al destino. session_start()
+        // bloquea el archivo de sesión mientras está abierto, así que
+        // aunque dos requests lleguen casi juntas, la segunda espera a que
+        // la primera termine de escribir la sesión antes de leer esto.
+        $incomingCode = is_string($_GET['code'] ?? null) ? $_GET['code'] : null;
+        if (
+                $incomingCode !== null
+                && isset($_SESSION['last_processed_code'])
+                && hash_equals($_SESSION['last_processed_code'], $incomingCode)
+                && self::getCurrentUser() !== null
+        ) {
+            $returnTo = $_SESSION['return_to'] ?? 'workspace.php';
+            unset($_SESSION['return_to']);
+            header('Location: ' . $returnTo);
+            exit;
+        }
+
         try {
             $oidc = KeycloakClient::get();
             $oidc->setRedirectURL($_ENV['KEYCLOAK_REDIRECT_URI'] ?? '');
@@ -133,42 +180,45 @@ class SecurityContext
             $cedula = $cedulaDigits !== '' ? $cedulaDigits : $rawCedula;
 
             $user = [
-                'sub'                => $idToken->sub ?? '',
-                'cedula'             => $cedula,
-                'preferred_username' => $idToken->preferred_username ?? 'unknown',
-                'email'              => $idToken->email ?? '',
-                'given_name'         => $idToken->given_name ?? '',
-                'family_name'        => $idToken->family_name ?? '',
-                'name'               => $idToken->name ?? '',
+                    'sub'                => $idToken->sub ?? '',
+                    'cedula'             => $cedula,
+                    'preferred_username' => $idToken->preferred_username ?? 'unknown',
+                    'email'              => $idToken->email ?? '',
+                    'given_name'         => $idToken->given_name ?? '',
+                    'family_name'        => $idToken->family_name ?? '',
+                    'name'               => $idToken->name ?? '',
                 // Se conservan por si en algún momento se quieren usar
                 // como fallback o para debug, pero hasRole() ya NO los usa.
-                'client_roles'       => self::extractClientRoles($decodedAccess),
-                'realm_roles'        => self::extractRealmRoles($decodedAccess),
+                    'client_roles'       => self::extractClientRoles($decodedAccess),
+                    'realm_roles'        => self::extractRealmRoles($decodedAccess),
                 // Autorización real: roles resueltos por cédula O username
                 // en la base externa (lo que primero coincida).
-                'external_roles'     => RoleProvider::getRolesForUser(
-                    $cedula,
-                    (string)($idToken->preferred_username ?? '')
-                ),
+                    'external_roles'     => RoleProvider::getRolesForUser(
+                            $cedula,
+                            (string)($idToken->preferred_username ?? '')
+                    ),
                 // id numérico de ADM.Usuario -- necesario para
                 // idPersonaCrea/idPersonaModifica en la auditoría
                 // institucional.
-                'idUsuario'          => RoleProvider::getUsuarioId(
-                    $cedula,
-                    (string)($idToken->preferred_username ?? '')
-                ),
+                    'idUsuario'          => RoleProvider::getUsuarioId(
+                            $cedula,
+                            (string)($idToken->preferred_username ?? '')
+                    ),
             ];
 
             $_SESSION[self::SESSION_USER] = $user;
             $_SESSION[self::SESSION_TOKENS] = [
-                'access_token'  => $accessToken,
-                'refresh_token' => $refreshToken,
-                'id_token'      => $oidc->getIdToken(),
-                'expires_at'    => (int) ($decodedAccess['exp'] ?? ($idToken->exp ?? time())),
+                    'access_token'  => $accessToken,
+                    'refresh_token' => $refreshToken,
+                    'id_token'      => $oidc->getIdToken(),
+                    'expires_at'    => (int) ($decodedAccess['exp'] ?? ($idToken->exp ?? time())),
             ];
 
             $returnTo = $_SESSION['return_to'] ?? 'workspace.php';
             unset($_SESSION['return_to']);
+            if ($incomingCode !== null) {
+                $_SESSION['last_processed_code'] = $incomingCode;
+            }
             header('Location: ' . $returnTo);
             exit;
         } catch (\Throwable $e) {
@@ -257,10 +307,10 @@ class SecurityContext
             }
 
             $_SESSION[self::SESSION_TOKENS] = [
-                'access_token'  => $newAccessToken,
-                'refresh_token' => $newRefreshToken,
-                'id_token'      => $oidc->getIdToken(),
-                'expires_at'    => (int) ($decoded['exp'] ?? (time() + 300)),
+                    'access_token'  => $newAccessToken,
+                    'refresh_token' => $newRefreshToken,
+                    'id_token'      => $oidc->getIdToken(),
+                    'expires_at'    => (int) ($decoded['exp'] ?? (time() + 300)),
             ];
             return true;
         } catch (\Throwable $e) {

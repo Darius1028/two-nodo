@@ -4,6 +4,9 @@ require_once __DIR__ . '/../vendor/autoload.php';
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
 
+// Manejo global de errores -- ver src/Core/ErrorHandler.php
+\App\Core\ErrorHandler::register();
+
 use App\Core\EntityManagerProvider;
 use App\Entity\AcademicRecord;
 use App\Security\SecurityContext;
@@ -23,13 +26,13 @@ $records = [];
 if ($searchCedula !== '') {
     $em = EntityManagerProvider::get();
     $qb = $em->createQueryBuilder()
-        ->select('r')->from(AcademicRecord::class, 'r')
-        ->where('r.cedula = :cedula')->setParameter('cedula', $searchCedula)
-        ->orderBy('r.origen_tabla', 'DESC')
-        ->addOrderBy('r.id', 'DESC');
+            ->select('r')->from(AcademicRecord::class, 'r')
+            ->where('r.cedula = :cedula')->setParameter('cedula', $searchCedula)
+            ->orderBy('r.origen_tabla', 'DESC')
+            ->addOrderBy('r.id', 'DESC');
     $allRecords = array_map(
-        static fn(AcademicRecord $r) => $r->toArray(),
-        $qb->getQuery()->getResult()
+            static fn(AcademicRecord $r) => $r->toArray(),
+            $qb->getQuery()->getResult()
     );
     $records = array_filter($allRecords, static function ($r) use ($startYear, $endYear) {
         $rYear = (int)($r['origen_tabla'] ?? 0);

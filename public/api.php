@@ -6,9 +6,13 @@ require_once __DIR__ . '/../vendor/autoload.php';
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
 
+// Manejo global de errores -- ver src/Core/ErrorHandler.php
+\App\Core\ErrorHandler::register();
+
 use App\Core\EntityManagerProvider;
 use App\Core\RequestContext;
 use App\Entity\AcademicRecord;
+use App\Security\RateLimiter;
 use App\Security\SecurityContext;
 use App\Service\ConfigService;
 use App\Service\CsvService;
@@ -85,6 +89,7 @@ try {
             ]]);
 
         case 'search':
+            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');
             $cedula = $getString($_GET, 'cedula', $getString($input, 'cedula'));
             if ($cedula === '') {
                 $respond(['success' => false, 'error' => 'Cedula required'], 400);
@@ -98,6 +103,7 @@ try {
             $respond(['success' => true, 'cedula' => $cedula, 'count' => count($records), 'records' => $records]);
 
         case 'get_record':
+            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');
             $id = $getInt($_GET, 'id', $getInt($input, 'id', 0));
             if ($id <= 0) {
                 $respond(['success' => false, 'error' => YEAR_ID_REQUIRED], 400);
@@ -110,6 +116,7 @@ try {
             $respond(['success' => true, 'record' => $record->toArray()]);
 
         case 'list_records':
+            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');
             $year   = $getInt($_GET, 'year', $getInt($input, 'year', (int)date('Y')));
             $limit  = max(1, min(500, $getInt($_GET, 'limit', $getInt($input, 'limit', 50))));
             $offset = max(0, $getInt($_GET, 'offset', $getInt($input, 'offset', 0)));
@@ -292,6 +299,7 @@ try {
             $respond(['success' => true, 'history' => CsvService::getHistory($limit)]);
 
         case 'generate_pdf':
+            SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');
             $cedula = $getString($_GET, 'cedula', $getString($input, 'cedula'));
             if ($cedula === '') {
                 $respond(['success' => false, 'error' => 'Cedula parameter required'], 400);
@@ -309,6 +317,52 @@ try {
                 'cedula'       => $cedula,
                 'record_count' => $count,
                 'pdf_url'      => 'PdfGenerator.php?cedula_query=' . urlencode($cedula),
+            ]);
+
+        // Endpoint PÚBLICO a propósito -- lo consume el validador de QR de
+        // WordPress (plugin ValidadorAcademicoCJ) para que cualquiera pueda
+        // verificar un certificado escaneando el código, sin cuenta en el
+        // sistema. Por eso NO lleva requireRole()/requireAuthentication().
+        // Justo por ser público, devuelve el mínimo indispensable para
+        // verificar (nombre + materia + año) -- nunca email, nota, total,
+        // id ni ningún otro dato sensible del expediente.
+        case 'verify_certificate':
+            $cedula = $getString($_GET, 'cedula', $getString($input, 'cedula'));
+            if ($cedula === '') {
+                $respond(['success' => false, 'error' => 'Cedula requerida'], 400);
+            }
+            if (!RateLimiter::allow('verify_certificate:' . RequestContext::getClientIp(), 15, 60)) {
+                $respond(['success' => false, 'error' => 'Demasiadas solicitudes. Intentá nuevamente en un minuto.'], 429);
+            }
+            $em = EntityManagerProvider::get();
+            $rows = $em->createQueryBuilder()
+                ->select('r.nombre', 'r.materia', 'r.origen_tabla')
+                ->from(AcademicRecord::class, 'r')
+                ->where('r.cedula = :cedula')->setParameter('cedula', $cedula)
+                ->orderBy('r.origen_tabla', 'DESC')
+                ->getQuery()->getArrayResult();
+
+            if (empty($rows)) {
+                $respond(['success' => false, 'error' => 'not_found'], 404);
+            }
+
+            $historial = [];
+            foreach ($rows as $r) {
+                $anio = $r['origen_tabla'] !== '' ? $r['origen_tabla'] : 'Histórico';
+                $materia = trim((string)$r['materia']);
+                if (!isset($historial[$anio])) {
+                    $historial[$anio] = [];
+                }
+                if ($materia !== '' && !in_array($materia, $historial[$anio], true)) {
+                    $historial[$anio][] = $materia;
+                }
+            }
+
+            $respond([
+                'success'   => true,
+                'cedula'    => $cedula,
+                'nombre'    => $rows[0]['nombre'],
+                'historial' => $historial,
             ]);
 
         // Acción EXPLÍCITA y separada de la vista previa: genera el PDF y
@@ -385,6 +439,7 @@ try {
                     'GET /api.php?action=get_config'                                   => 'Configuración pública del sistema',
                     'GET /api.php?action=get_history&limit=50'                         => 'Bitácora (admin)',
                     'GET /api.php?action=generate_pdf&cedula=12345678'                 => 'Info previa a generar PDF',
+                    'GET /api.php?action=verify_certificate&cedula=12345678'           => 'Verificación pública de certificado (sin login, para el QR)',
                 ],
             ]);
     }

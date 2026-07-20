@@ -51,7 +51,7 @@ class AcademicRecord
     #[ORM\Column(type: Types::STRING, length: 100, nullable: true)]
     private ?string $proceso = null;
 
-    #[ORM\Column(type: Types::STRING, length: 100, nullable: true)]
+    #[ORM\Column(type: Types::STRING, length: 200, nullable: true)]
     private ?string $grupo_objetivo = null;
 
     #[ORM\Column(type: Types::STRING, length: 50, nullable: true)]

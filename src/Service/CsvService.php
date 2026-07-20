@@ -9,12 +9,88 @@ use Throwable;
 
 class CsvService
 {
+    /**
+     * Filas agrupadas por statement de INSERT. Límite práctico de SQL Server:
+     * 2100 parámetros por sentencia. Cada fila manda 23 parámetros (todas
+     * las columnas de AcademicRecord::toArray() salvo id/fechaCrea/
+     * fechaModifica, que van sin bind: id es IDENTITY y las fechas usan
+     * GETDATE() literal). 2100/23 ≈ 91 -- se deja margen en 80.
+     */
+    private const ROWS_PER_INSERT = 80;
+
+    /**
+     * Encabezados EXACTOS que debe traer el CSV, en este orden -- definidos
+     * por el funcional/dueño del proceso y confirmados contra un archivo
+     * real de producción (Libro1.csv).
+     */
+    private const EXPECTED_HEADERS = [
+        'Proceso',
+        'Curso',
+        'Grupo Objetivo',
+        'Modalidad',
+        'N de Horas',
+        'Fecha Inicio',
+        'Facha Fin',
+        'Cedula',
+        'Nombre',
+        'Apellido',
+        'Email',
+        'Total',
+        'Aprueba',
+        'Año',
+    ];
+
+    /**
+     * Compara los encabezados reales del CSV contra EXPECTED_HEADERS,
+     * posición por posición. Devuelve un array vacío si coincide, o la
+     * lista de diferencias encontradas (para mostrárselas al usuario).
+     *
+     * @param array<int, mixed> $rawHeader
+     * @return string[]
+     */
+    private static function validateHeaderColumns(array $rawHeader): array
+    {
+        $expected = self::EXPECTED_HEADERS;
+        $actual = array_map(static fn($h) => trim((string)$h), $rawHeader);
+        $errors = [];
+
+        if (count($actual) !== count($expected)) {
+            return [sprintf(
+                'El archivo tiene %d columna(s), se esperaban %d: %s',
+                count($actual),
+                count($expected),
+                implode(', ', $expected)
+            )];
+        }
+
+        foreach ($expected as $i => $expectedName) {
+            $actualName = $actual[$i] ?? '';
+            if ($actualName !== $expectedName) {
+                $errors[] = sprintf(
+                    'Columna %d: se encontró "%s", se esperaba "%s".',
+                    $i + 1,
+                    $actualName,
+                    $expectedName
+                );
+            }
+        }
+
+        return $errors;
+    }
+
     public static function importCSV(string $filePath, int $fallbackYear): array
     {
         $result = ['success' => false, 'imported' => 0, 'errors' => []];
         $em = EntityManagerProvider::get();
         $conn = $em->getConnection();
         $stream = null;
+
+        // Un CSV de decenas de MB / cientos de miles de filas no entra en
+        // los 120s por defecto de PHP. set_time_limit(0) quita el límite
+        // desde el propio script; si igual corta, también hay que revisar
+        // request_terminate_timeout (PHP-FPM) y fastcgi_read_timeout/
+        // proxy_read_timeout (Nginx), que no dependen de este valor.
+        set_time_limit(0);
 
         try {
             if (!file_exists($filePath) || !is_readable($filePath)) {
@@ -30,6 +106,7 @@ class CsvService
             }
             fwrite($stream, $content);
             rewind($stream);
+            unset($content); // ya escrito en el stream; no hace falta la copia en memoria
 
             $separator = self::detectSeparator($stream);
             rewind($stream);
@@ -38,12 +115,30 @@ class CsvService
             if (!$rawHeader || count($rawHeader) < 2) {
                 throw new \RuntimeException('Formato de CSV inválido.');
             }
+
+            $headerErrors = self::validateHeaderColumns($rawHeader);
+            if (!empty($headerErrors)) {
+                throw new \RuntimeException(
+                    "Las columnas del archivo no coinciden con el formato requerido:\n"
+                    . implode("\n", $headerErrors)
+                    . "\n\nColumnas esperadas, en este orden exacto: "
+                    . implode(', ', self::EXPECTED_HEADERS)
+                );
+            }
+
             $header = array_map([self::class, 'normalizeString'], $rawHeader);
             $schema = ConfigService::getColumnSchema();
 
+            $classMetadata = $em->getClassMetadata(AcademicRecord::class);
+            $tableName = $classMetadata->getTableName();
+            $schemaName = $classMetadata->getSchemaName();
+            $qualifiedTableName = $schemaName !== null && $schemaName !== ''
+                ? $schemaName . '.' . $tableName
+                : $tableName;
+
             $conn->beginTransaction();
-            $batchSize = 100;
             $count = 0;
+            $pendingRows = [];
 
             while (($data = fgetcsv($stream, 10000, $separator)) !== false) {
                 if (count($data) < count($header)) {
@@ -54,18 +149,35 @@ class CsvService
                 $row = array_combine($header, $data);
                 $cleanParams = self::buildInsertParams($row, $schema, $fallbackYear);
 
+                // Se instancia la entidad SOLO para reutilizar su propia
+                // lógica de defaults/formato (estado, idPersonaCrea='0',
+                // ipCrea='', redondeo de nota/total a 2 decimales, etc.) --
+                // no se persiste ni se hace flush(), así que no pega contra
+                // la base. toArray() ya devuelve todo tipado y formateado
+                // igual que si Doctrine lo hubiera insertado él mismo.
                 $record = new AcademicRecord();
                 $record->fill($cleanParams);
-                $em->persist($record);
+                $rowData = $record->toArray();
+
+                // 'id' es IDENTITY (lo genera SQL Server). fechaCrea/
+                // fechaModifica se resuelven con GETDATE() directo en el
+                // SQL del batch, no acá, para no depender del formato
+                // exacto que espera SqlServerDateTimeType.
+                unset($rowData['id'], $rowData['fechaCrea'], $rowData['fechaModifica']);
+
+                $pendingRows[] = $rowData;
                 $count++;
 
-                if (($count % $batchSize) === 0) {
-                    $em->flush();
-                    $em->clear();
+                if (count($pendingRows) >= self::ROWS_PER_INSERT) {
+                    self::bulkInsertBatch($conn, $classMetadata, $qualifiedTableName, $pendingRows);
+                    $pendingRows = [];
                 }
             }
 
-            $em->flush();
+            if (!empty($pendingRows)) {
+                self::bulkInsertBatch($conn, $classMetadata, $qualifiedTableName, $pendingRows);
+            }
+
             $conn->commit();
 
             $result['success'] = true;
@@ -85,6 +197,57 @@ class CsvService
         return $result;
     }
 
+    /**
+     * Inserta un lote de filas en un único statement multi-VALUES, sin
+     * pasar por el UnitOfWork del ORM (evita el overhead de hidratar y
+     * trackear 200k+ entidades, que además de lento se come memoria).
+     *
+     * @param array<int, array<string, mixed>> $rows Filas ya resueltas vía
+     *        AcademicRecord::toArray() (sin 'id', 'fechaCrea' ni
+     *        'fechaModifica' -- esas dos se completan acá con GETDATE()).
+     */
+    private static function bulkInsertBatch(
+        \Doctrine\DBAL\Connection $conn,
+        \Doctrine\ORM\Mapping\ClassMetadata $classMetadata,
+        string $tableName,
+        array $rows
+    ): void {
+        if (empty($rows)) {
+            return;
+        }
+
+        // Todas las filas traen exactamente las mismas claves (salen de
+        // AcademicRecord::toArray() menos id/fechaCrea/fechaModifica), así
+        // que alcanza con mirar la primera para fijar el orden de columnas.
+        $fields = array_keys($rows[0]);
+        $columns = array_map(
+            static fn(string $field) => $classMetadata->getColumnName($field),
+            $fields
+        );
+        $columns[] = $classMetadata->getColumnName('fechaCrea');
+        $columns[] = $classMetadata->getColumnName('fechaModifica');
+
+        // GETDATE() es una expresión literal, no un parámetro: se resuelve
+        // en el propio SQL Server al momento del INSERT. Evita depender del
+        // formato exacto que produce/espera SqlServerDateTimeType.
+        $singleRowPlaceholders = '(' . implode(',', array_fill(0, count($fields), '?')) . ',GETDATE(),GETDATE())';
+        $sql = sprintf(
+            'INSERT INTO %s (%s) VALUES %s',
+            $tableName,
+            implode(',', $columns),
+            implode(',', array_fill(0, count($rows), $singleRowPlaceholders))
+        );
+
+        $params = [];
+        foreach ($rows as $row) {
+            foreach ($fields as $field) {
+                $params[] = $row[$field];
+            }
+        }
+
+        $conn->executeStatement($sql, $params);
+    }
+
     public static function validateCSV(string $filePath): array
     {
         $result = ['success' => false, 'rows' => 0, 'errors' => []];
@@ -97,14 +260,33 @@ class CsvService
             $result['errors'][] = 'No se pudo abrir el archivo.';
             return $result;
         }
-        $header = fgetcsv($stream, 10000, ',');
-        if (!$header || count($header) < 2) {
+        // Mismo detector que importCSV() -- si no coinciden, un archivo
+        // separado por ';' se leería acá como una sola columna gigante y
+        // el error de encabezado confundiría (parecería un problema de
+        // nombres cuando en realidad es el separador).
+        $separator = self::detectSeparator($stream);
+        rewind($stream);
+
+        $rawHeader = fgetcsv($stream, 10000, $separator);
+        if (!$rawHeader || count($rawHeader) < 2) {
             fclose($stream);
             $result['errors'][] = 'Formato CSV inválido.';
             return $result;
         }
+
+        $headerErrors = self::validateHeaderColumns($rawHeader);
+        if (!empty($headerErrors)) {
+            fclose($stream);
+            $result['errors'] = array_merge(
+                ['Las columnas del archivo no coinciden con el formato requerido:'],
+                $headerErrors,
+                ['Columnas esperadas, en este orden exacto: ' . implode(', ', self::EXPECTED_HEADERS)]
+            );
+            return $result;
+        }
+
         $rows = 0;
-        while (fgetcsv($stream, 10000, ',') !== false) {
+        while (fgetcsv($stream, 10000, $separator) !== false) {
             $rows++;
         }
         fclose($stream);

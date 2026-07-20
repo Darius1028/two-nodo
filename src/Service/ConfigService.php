@@ -35,6 +35,13 @@ class ConfigService
 
     public static function getQrBaseUrl(): string
     {
+        // Prioridad: .env (por entorno: dev/ngrok/producción, sin tocar
+        // config.json ni redeploy) -> config.json (editable en runtime si
+        // en algún momento se repone un campo en el panel) -> default fijo.
+        $fromEnv = trim((string)($_ENV['QR_BASE_URL'] ?? ''));
+        if ($fromEnv !== '') {
+            return $fromEnv;
+        }
         return (string)(self::get()['qr_base_url'] ?? 'https://escuela.funcionjudicial.gob.ec/verificar-record/');
     }
 

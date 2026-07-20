@@ -17,6 +17,17 @@ require_once __DIR__ . '/../vendor/autoload.php';
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
 
+// FIX: este script quedaba público en cualquier entorno -- expone si las
+// conexiones a la BD/BD de roles/Keycloak funcionan, y el issuer real de
+// Keycloak, sin pedir sesión (a propósito, para poder diagnosticar incluso
+// cuando el login está roto). Justamente por eso NO se protege con
+// SecurityContext::requireRole() -- se bloquea directamente por entorno:
+// en producción responde 404 liso, igual que si el archivo no existiera.
+if (($_ENV['APP_ENV'] ?? 'prod') === 'prod') {
+    http_response_code(404);
+    exit;
+}
+
 header('Content-Type: text/plain; charset=utf-8');
 
 function check(string $label, callable $fn): void

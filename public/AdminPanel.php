@@ -4,6 +4,9 @@ require_once __DIR__ . '/../vendor/autoload.php';
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
 
+// Manejo global de errores -- ver src/Core/ErrorHandler.php
+\App\Core\ErrorHandler::register();
+
 use App\Core\EntityManagerProvider;
 use App\Core\RequestContext;
 use App\Entity\AcademicRecord;
@@ -43,15 +46,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'delete_year_db':
                 $year = (int)($_POST['delete_year'] ?? 0);
                 if ($year <= 0) { $message = 'Año inválido.'; $messageType = 'error'; break; }
+                // Un año con cientos de miles de registros (como el CSV de
+                // 94MB que se importó) agotaba la memoria: findBy() sin
+                // límite hidrataba TODOS los registros de una sola vez y
+                // Doctrine los mantenía a todos trackeados en el
+                // UnitOfWork hasta el flush() final. Se batchea de a 500 y
+                // se hace clear() entre lotes para soltar esa memoria. Al
+                // no usar offset, cada vuelta trae "los primeros 500 que
+                // queden" -- los ya borrados en el lote anterior no vuelven
+                // a aparecer, así que no hace falta paginar.
+                set_time_limit(0);
                 $em = EntityManagerProvider::get();
                 $conn = $em->getConnection();
+                $batchSize = 500;
+                $count = 0;
                 try {
                     $conn->beginTransaction();
-                    $records = $em->getRepository(AcademicRecord::class)->findBy(['origen_tabla' => (string)$year]);
-                    foreach ($records as $r) { $em->remove($r); }
-                    $em->flush();
+                    while (true) {
+                        $batch = $em->getRepository(AcademicRecord::class)->findBy(
+                                ['origen_tabla' => (string)$year],
+                                null,
+                                $batchSize
+                        );
+                        if (empty($batch)) {
+                            break;
+                        }
+                        foreach ($batch as $r) {
+                            $em->remove($r);
+                        }
+                        $em->flush();
+                        $em->clear();
+                        $count += count($batch);
+                    }
                     $conn->commit();
-                    $count = count($records);
                     $message = "Se eliminaron $count registros del año $year.";
                     $messageType = 'success';
                     CsvService::logHistory('Eliminación Masiva', "Se eliminaron $count registros del año $year.");
@@ -330,6 +357,18 @@ $csrf = csrfToken();
         function executeDeleteYear() {
             document.getElementById('deleteYearForm').submit();
         }
+        let pendingDeleteRecordFormId = null;
+        function confirmDeleteRecord(formId, cedula) {
+            pendingDeleteRecordFormId = formId;
+            document.getElementById('deleteRecordMessage').textContent =
+                '¿Eliminar este registro (cédula ' + cedula + ')?';
+            document.getElementById('deleteRecordModal').classList.add('active');
+        }
+        function executeDeleteRecord() {
+            if (pendingDeleteRecordFormId) {
+                document.getElementById(pendingDeleteRecordFormId).submit();
+            }
+        }
         let dragSrcEl = null;
         function handleDragStart(e) { dragSrcEl = this; e.dataTransfer.effectAllowed = 'move'; }
         function handleDrop(e) {
@@ -512,11 +551,11 @@ $csrf = csrfToken();
                         <td><?= e($r['aprueba'] ?? '') ?></td>
                         <td>
                             <button class="btn btn-primary btn-sm" onclick='openEditModal(<?= json_encode($r, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?>)'>Editar</button>
-                            <form action="?tab=records" method="POST" style="display:inline;" onsubmit="return confirm('¿Eliminar este registro (cédula <?= e($r['cedula'] ?? '') ?>)?');">
+                            <form id="deleteRecordForm-<?= (int)($r['id'] ?? 0) ?>" action="?tab=records" method="POST" style="display:inline;">
                                 <input type="hidden" name="action" value="delete_record">
                                 <input type="hidden" name="csrf_token" value="<?= e($csrf) ?>">
                                 <input type="hidden" name="delete_id" value="<?= (int)($r['id'] ?? 0) ?>">
-                                <button type="submit" class="btn btn-danger btn-sm">Eliminar</button>
+                                <button type="button" class="btn btn-danger btn-sm" onclick="confirmDeleteRecord('deleteRecordForm-<?= (int)($r['id'] ?? 0) ?>', '<?= e($r['cedula'] ?? '') ?>')">Eliminar</button>
                             </form>
                         </td>
                     </tr>
@@ -659,6 +698,7 @@ $csrf = csrfToken();
             <div class="builder-toolbar">
                 <label for="newColSelect" class="visually-hidden">Seleccionar columna</label>
                 <select id="newColSelect" style="max-width: 250px;">
+                    <option value="cedula">Cédula</option>
                     <option value="proceso">Proceso</option>
                     <option value="materia">Curso (Materia)</option>
                     <option value="grupo_objetivo">Grupo Objetivo</option>
@@ -801,6 +841,17 @@ $csrf = csrfToken();
         <div style="display:flex; gap:10px; justify-content:center;">
             <button type="button" class="btn btn-secondary" onclick="closeModal('deleteConfirmModal')">Cancelar</button>
             <button type="button" class="btn btn-danger" onclick="executeDeleteYear()">Sí, Eliminar Registros</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal" id="deleteRecordModal">
+    <div class="modal-content modal-sm">
+        <h3 style="color:#dc3545; margin-bottom: 15px;">⚠️ Confirmar Eliminación</h3>
+        <p id="deleteRecordMessage" style="margin-bottom: 20px; color:#555;"></p>
+        <div style="display:flex; gap:10px; justify-content:center;">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('deleteRecordModal')">Cancelar</button>
+            <button type="button" class="btn btn-danger" onclick="executeDeleteRecord()">Sí, Eliminar</button>
         </div>
     </div>
 </div>
