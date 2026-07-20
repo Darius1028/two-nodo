@@ -11,6 +11,11 @@ if (ob_get_level() > 0) ob_end_clean();
 
 // Vista previa únicamente -- NO archiva nada en el Repositorio Documental.
 // Para eso está api.php?action=archive_pdf, una acción separada y explícita.
+//
+// FIX: este endpoint no estaba protegido porque antes no era accesible
+// directamente (vivía junto al resto de la app). Ahora que public/ es el
+// document root de Nginx, cualquiera podía pedir el PDF de cualquier cédula
+// sin loguearse. Se aplica la misma política de acceso que workspace.php.
 SecurityContext::ensureSession();
 if (($_ENV['WORKSPACE_ACCESS_MODE'] ?? 'protected') === 'protected') {
     SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');

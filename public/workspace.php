@@ -23,13 +23,13 @@ $records = [];
 if ($searchCedula !== '') {
     $em = EntityManagerProvider::get();
     $qb = $em->createQueryBuilder()
-            ->select('r')->from(AcademicRecord::class, 'r')
-            ->where('r.cedula = :cedula')->setParameter('cedula', $searchCedula)
-            ->orderBy('r.origen_tabla', 'DESC')
-            ->addOrderBy('r.id', 'DESC');
+        ->select('r')->from(AcademicRecord::class, 'r')
+        ->where('r.cedula = :cedula')->setParameter('cedula', $searchCedula)
+        ->orderBy('r.origen_tabla', 'DESC')
+        ->addOrderBy('r.id', 'DESC');
     $allRecords = array_map(
-            static fn(AcademicRecord $r) => $r->toArray(),
-            $qb->getQuery()->getResult()
+        static fn(AcademicRecord $r) => $r->toArray(),
+        $qb->getQuery()->getResult()
     );
     $records = array_filter($allRecords, static function ($r) use ($startYear, $endYear) {
         $rYear = (int)($r['origen_tabla'] ?? 0);
@@ -81,9 +81,14 @@ function e($v): string {
             const iframe = document.getElementById('pdfIframe');
             if (iframe) {
                 iframe.src = 'PdfGenerator.php?cedula_query=' + cedula
-                    + '&start=' + start + '&end=' + end
-                    + '&name=' + nombre + '&email=' + email
-                    + '&periodo=' + periodo + '&extra1=' + extra1 + '&extra2=' + extra2
+                    + '&start=' + start
+                    + '&end=' + end
+                    + '&name=' + nombre
+                    + '&email=' + email
+                    + '&periodo=' + periodo
+                    + '&extra1=' + extra1
+                    + '&extra2=' + extra2
+                    + '&_=' + Date.now()
                     + '#toolbar=1';
                 iframe.style.display = 'block';
                 document.getElementById('emptyState').style.display = 'none';

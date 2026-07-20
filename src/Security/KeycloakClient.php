@@ -46,10 +46,16 @@ class KeycloakClient
             // Cliente PÚBLICO: sin secreto, protegido con PKCE.
             self::$instance = new OpenIDConnectClient($issuer, $clientId, '');
             self::$instance->setCodeChallengeMethod('S256');
+
+            // Solo el cliente público debe forzar 'none' en el token
+            // endpoint: el confidencial necesita seguir enviando su
+            // client_secret, así que esto NO va en el bloque compartido.
+            self::$instance->setTokenEndpointAuthMethodsSupported(['none']);
         }
 
+        self::$instance->setRedirectURL($redirectUri);
         self::$instance->addScope(['openid', 'profile', 'email']);
-        self::$instance->setTimeOut(30);
+        self::$instance->setTimeout(30);
 
         if ($appEnv !== 'prod') {
             self::$instance->setVerifyHost(false);

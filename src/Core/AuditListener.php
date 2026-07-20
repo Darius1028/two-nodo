@@ -8,7 +8,7 @@ use App\Entity\AcademicRecord;
 use App\Entity\AcademicRecordAudit;
 use App\Service\AcademicRecordAuditService;
 use Doctrine\ORM\Event\PostPersistEventArgs;
-use Doctrine\ORM\Event\PostRemoveEventArgs;
+use Doctrine\ORM\Event\PreRemoveEventArgs;
 use Doctrine\ORM\Event\PostUpdateEventArgs;
 use Doctrine\ORM\Events;
 
@@ -21,7 +21,7 @@ class AuditListener
 {
     public function getSubscribedEvents(): array
     {
-        return [Events::postPersist, Events::postUpdate, Events::postRemove];
+        return [Events::postPersist, Events::postUpdate, Events::preRemove];
     }
 
     public function postPersist(PostPersistEventArgs $args): void
@@ -34,14 +34,14 @@ class AuditListener
         $this->log($args->getObject(), $args, AcademicRecordAudit::UPDATE);
     }
 
-    public function postRemove(PostRemoveEventArgs $args): void
+    public function preRemove(PreRemoveEventArgs $args): void
     {
         $this->log($args->getObject(), $args, AcademicRecordAudit::DELETE);
     }
 
     private function log(
         object $entity,
-        PostPersistEventArgs|PostUpdateEventArgs|PostRemoveEventArgs $args,
+        PostPersistEventArgs|PostUpdateEventArgs|PreRemoveEventArgs $args,
         int $revisionType
     ): void {
         if (!$entity instanceof AcademicRecord || $entity->getId() === null) {
