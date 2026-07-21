@@ -3,7 +3,10 @@ services:
     image: nginx:alpine
     container_name: academic_nginx
     ports:
-      - "80:80"
+      # 8090 en el host, no 80 -- ese puerto ya lo usa el Apache de XAMPP
+      # (para WordPress) en esta máquina. El 80 de ADENTRO del contenedor
+      # no cambia, solo el mapeo hacia el host.
+      - "8090:80"
     volumes:
       - ./public:/var/www/html/public:ro
       - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro

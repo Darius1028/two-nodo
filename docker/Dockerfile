@@ -51,6 +51,11 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
 # Composer: evita utilizar "latest" para que no cambie constantemente.
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
+# Límites de subida de archivos (import de CSV) -- ver comentarios en el
+# propio archivo. Se copia antes que el resto del código porque casi nunca
+# cambia -- aprovecha la caché de capas de Docker.
+COPY docker/uploads.ini /usr/local/etc/php/conf.d/uploads.ini
+
 WORKDIR /var/www/html
 
 # Instalar dependencias primero para aprovechar la caché.
