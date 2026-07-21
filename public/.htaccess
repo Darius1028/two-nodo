@@ -1,1 +1,2 @@
 Require all granted
+ErrorDocument 403 /sistema-record-academico/public/403.html
