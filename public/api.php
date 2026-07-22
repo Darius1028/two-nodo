@@ -17,7 +17,6 @@ use App\Security\SecurityContext;
 use App\Service\ConfigService;
 use App\Service\CsvService;
 use App\Service\ErrorFinder;
-use App\Service\KeycloakTokenService;
 use App\Service\PdfService;
 
 SecurityContext::ensureSession();
@@ -412,11 +411,15 @@ try {
             }
             $startYear = $getInt($input, 'start_year', 2010);
             $endYear = $getInt($input, 'end_year', (int)date('Y'));
+            $accessToken = SecurityContext::getAccessToken();
+            if ($accessToken === null) {
+                $respond([
+                    'success' => false,
+                    'error' => 'No se pudo obtener el access token del usuario autenticado.',
+                ], 401);
+            }
 
             try {
-                $tokenService = new KeycloakTokenService();
-                $accessToken = $tokenService->obtenerAccessToken();
-
                 $options = [
                     'start_year' => $startYear,
                     'end_year' => $endYear,
