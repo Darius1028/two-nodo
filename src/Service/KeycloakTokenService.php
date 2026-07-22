@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App\Service;
 
+use App\Exception\SystemException;
 use App\Security\KeycloakClient;
-use RuntimeException;
 use Throwable;
 
 /**
@@ -57,7 +57,7 @@ final class KeycloakTokenService
             // jumbojett/OpenID-Connect-PHP#392 para el workaround completo).
             $response = $oidc->requestClientCredentialsToken();
         } catch (Throwable $e) {
-            throw new RuntimeException(
+            throw new SystemException(
                 'No se pudo obtener el token de servicio de Keycloak: ' . $e->getMessage(),
                 0,
                 $e
@@ -66,7 +66,7 @@ final class KeycloakTokenService
 
         $accessToken = $response->access_token ?? null;
         if (!is_string($accessToken) || $accessToken === '') {
-            throw new RuntimeException(
+            throw new SystemException(
                 'Keycloak no devolvió un access_token de servicio válido. '
                 . 'Verificar que el cliente tenga "Service Accounts Enabled".'
             );

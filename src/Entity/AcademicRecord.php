@@ -9,11 +9,11 @@ use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 
 #[ORM\Entity]
-#[ORM\Table(name: 'academic_records', schema: 'ACADEMICO')]
-#[ORM\Index(columns: ['cedula'], name: 'IX_academic_records_cedula')]
-#[ORM\Index(columns: ['origen_tabla'], name: 'IX_academic_records_origen_tabla')]
-#[ORM\Index(columns: ['materia'], name: 'IX_academic_records_materia')]
-#[ORM\Index(columns: ['anio'], name: 'IX_academic_records_anio')]
+#[ORM\Table(name: 'RecordAcademico', schema: 'Academico')]
+#[ORM\Index(columns: ['cedula'], name: 'IX_RecordAcademico_cedula')]
+#[ORM\Index(columns: ['origen_tabla'], name: 'IX_RecordAcademico_origen_tabla')]
+#[ORM\Index(columns: ['materia'], name: 'IX_RecordAcademico_materia')]
+#[ORM\Index(columns: ['anio'], name: 'IX_RecordAcademico_anio')]
 class AcademicRecord
 {
     #[ORM\Id]
@@ -79,7 +79,7 @@ class AcademicRecord
     #[ORM\Column(type: SqlServerDateTimeType::NAME)]
     private \DateTimeInterface $fechaCrea;
 
-    #[ORM\Column(type: Types::STRING, length: 25)]
+    #[ORM\Column(type: Types::STRING, length: 45)]
     private string $ipCrea = '';
 
     #[ORM\Column(type: Types::STRING, length: 50)]
@@ -91,7 +91,7 @@ class AcademicRecord
     #[ORM\Column(type: SqlServerDateTimeType::NAME)]
     private \DateTimeInterface $fechaModifica;
 
-    #[ORM\Column(type: Types::STRING, length: 25)]
+    #[ORM\Column(type: Types::STRING, length: 45)]
     private string $ipModifica = '';
 
     #[ORM\Column(type: Types::STRING, length: 50)]
@@ -249,7 +249,7 @@ class AcademicRecord
         $this->estado = 'A';
         $this->idPersonaCrea = $idPersona;
         $this->fechaCrea = $fecha;
-        $this->ipCrea = mb_substr(trim($ip), 0, 25);
+        $this->ipCrea = mb_substr(trim($ip), 0, 45);
         $this->equipoCrea = mb_substr(trim($equipo), 0, 50);
 
         $this->idPersonaModifica = $idPersona;
@@ -267,7 +267,7 @@ class AcademicRecord
     ): void {
         $this->idPersonaModifica = $idPersona;
         $this->fechaModifica = new \DateTime();
-        $this->ipModifica = mb_substr(trim($ip), 0, 25);
+        $this->ipModifica = mb_substr(trim($ip), 0, 45);
         $this->equipoModifica = mb_substr(trim($equipo), 0, 50);
         $this->motivoModifica = mb_substr(trim($motivo), 0, 250);
     }

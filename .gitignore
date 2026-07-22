@@ -6,3 +6,5 @@
 *.log
 .DS_Store
 Thumbs.db
+var/log/historial.json
+var/log/*.json

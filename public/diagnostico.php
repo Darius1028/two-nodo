@@ -13,6 +13,8 @@ declare(strict_types=1);
  * si las conexiones funcionan o no, información que no debería ser pública.
  */
 
+use App\Exception\SystemException;
+
 require_once __DIR__ . '/../vendor/autoload.php';
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
@@ -58,7 +60,7 @@ check('Variables .env cargadas', function () {
     ];
     $missing = array_filter($required, static fn($v) => !isset($_ENV[$v]) || $_ENV[$v] === '');
     if (!empty($missing)) {
-        throw new \RuntimeException('Faltan: ' . implode(', ', $missing));
+        throw new SystemException('Faltan: ' . implode(', ', $missing));
     }
     return count($required) . ' variables presentes';
 });
@@ -66,7 +68,7 @@ check('Variables .env cargadas', function () {
 // 2. Extensión pdo_sqlsrv cargada
 check('Extensión pdo_sqlsrv', function () {
     if (!extension_loaded('pdo_sqlsrv')) {
-        throw new \RuntimeException('No está cargada. Revisá php.ini y reiniciá Apache/Nginx.');
+        throw new SystemException('No está cargada. Revisá php.ini y reiniciá Apache/Nginx.');
     }
     return phpversion('pdo_sqlsrv');
 });
@@ -98,11 +100,11 @@ check('Keycloak discovery document', function () {
     $response = @file_get_contents($url, false, $ctx);
 
     if ($response === false) {
-        throw new \RuntimeException("No se pudo conectar a $url");
+        throw new SystemException("No se pudo conectar a $url");
     }
     $data = json_decode($response, true);
     if (!isset($data['authorization_endpoint'])) {
-        throw new \RuntimeException("Respuesta inesperada desde $url: " . substr($response, 0, 200));
+        throw new SystemException("Respuesta inesperada desde $url: " . substr($response, 0, 200));
     }
     return "issuer = {$data['issuer']}";
 });
@@ -110,7 +112,7 @@ check('Keycloak discovery document', function () {
 // 6. Cliente OIDC se puede instanciar (valida secret/config, sin redirigir)
 check('KeycloakClient::get()', function () {
     $oidc = App\Security\KeycloakClient::get();
-    return 'instancia creada correctamente (secret configurado)';
+    return 'instancia creada correctamente (secret configurado)'. $oidc;
 });
 
 echo "\n=== Fin del diagnóstico ===\n";

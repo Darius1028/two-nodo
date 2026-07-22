@@ -5,6 +5,9 @@ namespace App\Service;
 
 use App\Core\EntityManagerProvider;
 use App\Entity\AcademicRecord;
+use App\Entity\AcademicRecordAudit;
+use App\Exception\SystemException;
+use App\Exception\ValidationException;
 use Throwable;
 
 class CsvService
@@ -17,6 +20,12 @@ class CsvService
      * GETDATE() literal). 2100/23 ≈ 91 -- se deja margen en 80.
      */
     private const ROWS_PER_INSERT = 80;
+
+    /**
+     * Filas por batch en el INSERT de auditoría AUD. La tabla tiene 28
+     * columnas con parámetros → 2100 / 28 ≈ 75. Se deja margen en 70.
+     */
+    private const AUD_ROWS_PER_BATCH = 70;
 
     /**
      * Encabezados EXACTOS que debe traer el CSV, en este orden -- definidos
@@ -78,47 +87,42 @@ class CsvService
         return $errors;
     }
 
-    public static function importCSV(string $filePath, int $fallbackYear): array
-    {
+    public static function importCSV(
+        string $filePath,
+        int $fallbackYear,
+        int $idPersona = 0,
+        string $ip = '',
+        string $equipo = ''
+    ): array {
         $result = ['success' => false, 'imported' => 0, 'errors' => []];
         $em = EntityManagerProvider::get();
         $conn = $em->getConnection();
         $stream = null;
 
-        // Un CSV de decenas de MB / cientos de miles de filas no entra en
-        // los 120s por defecto de PHP. set_time_limit(0) quita el límite
-        // desde el propio script; si igual corta, también hay que revisar
-        // request_terminate_timeout (PHP-FPM) y fastcgi_read_timeout/
-        // proxy_read_timeout (Nginx), que no dependen de este valor.
         set_time_limit(0);
+
+        error_log('[CsvService] importCSV iniciado'
+            . ' | idPersona=' . $idPersona
+            . ' | ip="' . $ip . '"'
+            . ' | equipo="' . $equipo . '"');
 
         try {
             if (!file_exists($filePath) || !is_readable($filePath)) {
-                throw new \RuntimeException('El archivo CSV no se puede leer.');
+                throw new SystemException('El archivo CSV no se puede leer.');
             }
 
-            $content = (string)file_get_contents($filePath);
-            $content = self::normalizeEncoding($content);
-
-            $stream = fopen('php://memory', 'r+');
-            if ($stream === false) {
-                throw new \RuntimeException('No se pudo abrir el stream en memoria.');
-            }
-            fwrite($stream, $content);
-            rewind($stream);
-            unset($content); // ya escrito en el stream; no hace falta la copia en memoria
-
+            [$stream, $dataOffset] = self::openStreamUtf8($filePath);
             $separator = self::detectSeparator($stream);
-            rewind($stream);
+            fseek($stream, $dataOffset);
 
             $rawHeader = fgetcsv($stream, 10000, $separator);
             if (!$rawHeader || count($rawHeader) < 2) {
-                throw new \RuntimeException('Formato de CSV inválido.');
+                throw new ValidationException('Formato de CSV inválido.');
             }
 
             $headerErrors = self::validateHeaderColumns($rawHeader);
             if (!empty($headerErrors)) {
-                throw new \RuntimeException(
+                throw new ValidationException(
                     "Las columnas del archivo no coinciden con el formato requerido:\n"
                     . implode("\n", $headerErrors)
                     . "\n\nColumnas esperadas, en este orden exacto: "
@@ -127,63 +131,25 @@ class CsvService
             }
 
             $header = array_map([self::class, 'normalizeString'], $rawHeader);
-            $schema = ConfigService::getColumnSchema();
-
-            $classMetadata = $em->getClassMetadata(AcademicRecord::class);
-            $tableName = $classMetadata->getTableName();
-            $schemaName = $classMetadata->getSchemaName();
-            $qualifiedTableName = $schemaName !== null && $schemaName !== ''
-                ? $schemaName . '.' . $tableName
-                : $tableName;
 
             $conn->beginTransaction();
-            $count = 0;
-            $pendingRows = [];
 
-            while (($data = fgetcsv($stream, 10000, $separator)) !== false) {
-                if (count($data) < count($header)) {
-                    $data = array_pad($data, count($header), '');
-                } elseif (count($data) > count($header)) {
-                    $data = array_slice($data, 0, count($header));
-                }
-                $row = array_combine($header, $data);
-                $cleanParams = self::buildInsertParams($row, $schema, $fallbackYear);
-
-                // Se instancia la entidad SOLO para reutilizar su propia
-                // lógica de defaults/formato (estado, idPersonaCrea='0',
-                // ipCrea='', redondeo de nota/total a 2 decimales, etc.) --
-                // no se persiste ni se hace flush(), así que no pega contra
-                // la base. toArray() ya devuelve todo tipado y formateado
-                // igual que si Doctrine lo hubiera insertado él mismo.
-                $record = new AcademicRecord();
-                $record->fill($cleanParams);
-                $rowData = $record->toArray();
-
-                // 'id' es IDENTITY (lo genera SQL Server). fechaCrea/
-                // fechaModifica se resuelven con GETDATE() directo en el
-                // SQL del batch, no acá, para no depender del formato
-                // exacto que espera SqlServerDateTimeType.
-                unset($rowData['id'], $rowData['fechaCrea'], $rowData['fechaModifica']);
-
-                $pendingRows[] = $rowData;
-                $count++;
-
-                if (count($pendingRows) >= self::ROWS_PER_INSERT) {
-                    self::bulkInsertBatch($conn, $classMetadata, $qualifiedTableName, $pendingRows);
-                    $pendingRows = [];
-                }
-            }
-
-            if (!empty($pendingRows)) {
-                self::bulkInsertBatch($conn, $classMetadata, $qualifiedTableName, $pendingRows);
-            }
+            // Pasamos los datos de auditoría en un array para no exceder
+            // el límite de parámetros permitidos por SonarQube (S107)
+            $count = self::processAndInsertRows(
+                $stream,
+                $separator,
+                $header,
+                $fallbackYear,
+                [$idPersona, $ip, $equipo]
+            );
 
             $conn->commit();
 
             $result['success'] = true;
             $result['imported'] = $count;
             self::logHistory('Importación CSV', "Se importaron $count registros.");
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             if ($conn->isTransactionActive()) {
                 $conn->rollBack();
             }
@@ -198,22 +164,87 @@ class CsvService
     }
 
     /**
+     * Procesa y guarda los registros del CSV en lotes para reducir la complejidad cognitiva.
+     */
+    private static function processAndInsertRows(
+        $stream,
+        string $separator,
+        array $header,
+        int $fallbackYear,
+        array $auditData
+    ): int {
+        $em = EntityManagerProvider::get();
+        $conn = $em->getConnection();
+        $schema = ConfigService::getColumnSchema();
+
+        $classMetadata = $em->getClassMetadata(AcademicRecord::class);
+        $tableName = $classMetadata->getTableName();
+        $schemaName = $classMetadata->getSchemaName();
+        $qualifiedTableName = $schemaName !== null && $schemaName !== ''
+            ? $schemaName . '.' . $tableName
+            : $tableName;
+
+        $count = 0;
+        $pendingRows = [];
+        // Desempaquetar auditoría
+        [$idPersona, $ip, $equipo] = $auditData;
+
+        while (($data = fgetcsv($stream, 10000, $separator)) !== false) {
+            if (count($data) < count($header)) {
+                $data = array_pad($data, count($header), '');
+            } elseif (count($data) > count($header)) {
+                $data = array_slice($data, 0, count($header));
+            }
+            $row = array_combine($header, $data);
+            $cleanParams = self::buildInsertParams($row, $schema, $fallbackYear);
+
+            $record = new AcademicRecord();
+            $record->fill($cleanParams);
+            $record->setAuditoriaCreacion($idPersona, $ip, $equipo);
+            $rowData = $record->toArray();
+
+            unset($rowData['id'], $rowData['fechaCrea'], $rowData['fechaModifica']);
+
+            $pendingRows[] = $rowData;
+            $count++;
+
+            if (count($pendingRows) >= self::ROWS_PER_INSERT) {
+                $inserted = self::bulkInsertBatch($conn, $classMetadata, $qualifiedTableName, $pendingRows);
+                self::bulkInsertAudit($conn, $inserted);
+                $pendingRows = [];
+            }
+        }
+
+        if (!empty($pendingRows)) {
+            $inserted = self::bulkInsertBatch($conn, $classMetadata, $qualifiedTableName, $pendingRows);
+            self::bulkInsertAudit($conn, $inserted);
+        }
+
+        return $count;
+    }
+
+    /**
      * Inserta un lote de filas en un único statement multi-VALUES, sin
      * pasar por el UnitOfWork del ORM (evita el overhead de hidratar y
      * trackear 200k+ entidades, que además de lento se come memoria).
      *
+     * Usa OUTPUT INSERTED.* para capturar los datos reales escritos,
+     * incluyendo el id IDENTITY y las fechas resueltas por GETDATE(),
+     * necesarios para el INSERT de auditoría en AUD.
+     *
      * @param array<int, array<string, mixed>> $rows Filas ya resueltas vía
      *        AcademicRecord::toArray() (sin 'id', 'fechaCrea' ni
      *        'fechaModifica' -- esas dos se completan acá con GETDATE()).
+     * @return array<int, array<string, mixed>> Filas tal como quedaron en BD.
      */
     private static function bulkInsertBatch(
         \Doctrine\DBAL\Connection $conn,
         \Doctrine\ORM\Mapping\ClassMetadata $classMetadata,
         string $tableName,
         array $rows
-    ): void {
+    ): array {
         if (empty($rows)) {
-            return;
+            return [];
         }
 
         // Todas las filas traen exactamente las mismas claves (salen de
@@ -227,14 +258,22 @@ class CsvService
         $columns[] = $classMetadata->getColumnName('fechaCrea');
         $columns[] = $classMetadata->getColumnName('fechaModifica');
 
+        // OUTPUT INSERTED.* devuelve cada fila tal como quedó en la tabla,
+        // incluido el id generado por IDENTITY y las fechas de GETDATE().
+        $outputCols = array_map(
+            static fn(string $c) => 'INSERTED.' . $c,
+            array_merge(['id'], $columns)
+        );
+
         // GETDATE() es una expresión literal, no un parámetro: se resuelve
         // en el propio SQL Server al momento del INSERT. Evita depender del
         // formato exacto que produce/espera SqlServerDateTimeType.
         $singleRowPlaceholders = '(' . implode(',', array_fill(0, count($fields), '?')) . ',GETDATE(),GETDATE())';
         $sql = sprintf(
-            'INSERT INTO %s (%s) VALUES %s',
+            'INSERT INTO %s (%s) OUTPUT %s VALUES %s',
             $tableName,
             implode(',', $columns),
+            implode(',', $outputCols),
             implode(',', array_fill(0, count($rows), $singleRowPlaceholders))
         );
 
@@ -245,7 +284,59 @@ class CsvService
             }
         }
 
-        $conn->executeStatement($sql, $params);
+        return $conn->executeQuery($sql, $params)->fetchAllAssociative();
+    }
+
+    /**
+     * Inserta en AUD.REVINFO y AcademicoAUD.RecordAcademico_AUD las filas devueltas
+     * por bulkInsertBatch. Usa AcademicRecordAudit::fromRawRow() + toInsertArray()
+     * para que la entidad sea la única fuente de verdad del mapeo de columnas.
+     * Se procesa en chunks de AUD_ROWS_PER_BATCH para no superar el límite de
+     * 2100 parámetros de SQL Server.
+     *
+     * @param array<int, array<string, mixed>> $insertedRows
+     */
+    private static function bulkInsertAudit(
+        \Doctrine\DBAL\Connection $conn,
+        array $insertedRows
+    ): void {
+        if (empty($insertedRows)) {
+            return;
+        }
+
+        foreach (array_chunk($insertedRows, self::AUD_ROWS_PER_BATCH) as $chunk) {
+            $revId = $conn->fetchOne(
+                'INSERT INTO AUD.REVINFO (REVTSTMP) OUTPUT INSERTED.REV VALUES (?)',
+                [(string) round(microtime(true) * 1000)]
+            );
+
+            if ($revId === false) {
+                throw new ValidationException('No se pudo generar la revisión de auditoría para el batch CSV.');
+            }
+
+            $audits = array_map(
+                static fn(array $row) => AcademicRecordAudit::fromRawRow($row, (int) $revId, AcademicRecordAudit::INSERT),
+                $chunk
+            );
+
+            $audColumns = array_keys($audits[0]->toInsertArray());
+            $placeholder = '(' . implode(',', array_fill(0, count($audColumns), '?')) . ')';
+
+            $sql = sprintf(
+                'INSERT INTO AcademicoAUD.RecordAcademico_AUD (%s) VALUES %s',
+                implode(',', $audColumns),
+                implode(',', array_fill(0, count($audits), $placeholder))
+            );
+
+            $params = [];
+            foreach ($audits as $audit) {
+                foreach ($audit->toInsertArray() as $value) {
+                    $params[] = $value;
+                }
+            }
+
+            $conn->executeStatement($sql, $params);
+        }
     }
 
     public static function validateCSV(string $filePath): array
@@ -471,15 +562,60 @@ class CsvService
         ];
     }
 
-    private static function normalizeEncoding(string $content): string
+    /**
+     * Abre el CSV como stream UTF-8 sin cargar el archivo entero en RAM.
+     *
+     * - UTF-8 (con o sin BOM): devuelve el archivo directo + offset post-BOM.
+     * - Otro encoding: convierte en chunks de 64 KB a php://temp (vuelca a
+     *   disco tras 2 MB, así archivos de 97 MB no saturan la RAM).
+     *
+     * @return array{0: resource, 1: int}  [stream, dataOffset]
+     */
+    private static function openStreamUtf8(string $filePath): array
     {
-        $encoding = mb_detect_encoding($content, 'UTF-8, ISO-8859-1, Windows-1252', true);
-        if ($encoding !== false && $encoding !== 'UTF-8') {
-            $content = mb_convert_encoding($content, 'UTF-8', $encoding);
-        } elseif ($encoding === false) {
-            $content = mb_convert_encoding($content, 'UTF-8', 'Windows-1252');
+        $raw = fopen($filePath, 'rb');
+        if ($raw === false) {
+            throw new ValidationException('No se pudo abrir el archivo CSV.');
         }
-        return (string)preg_replace('/^\xEF\xBB\xBF/', '', $content);
+
+        // 64 KB son suficientes para detectar encoding y BOM con fiabilidad.
+        $sample = (string) fread($raw, 65536);
+        rewind($raw);
+
+        $hasBom   = str_starts_with($sample, "\xEF\xBB\xBF");
+        $clean    = $hasBom ? substr($sample, 3) : $sample;
+        $encoding = mb_detect_encoding($clean, 'UTF-8, ISO-8859-1, Windows-1252', true);
+
+        // UTF-8 (o no detectado): usar el archivo directamente, sin copias.
+        if ($encoding === false || $encoding === 'UTF-8') {
+            $offset = $hasBom ? 3 : 0;
+            fseek($raw, $offset);
+            return [$raw, $offset];
+        }
+
+        // Otro encoding: convertir chunk a chunk a php://temp para no saturar RAM.
+        // maxmemory:2097152 → vuelca al sistema de archivos tras 2 MB.
+        $temp = fopen('php://temp/maxmemory:2097152', 'r+');
+        if ($temp === false) {
+            fclose($raw);
+            throw new ValidationException('No se pudo crear el stream temporal de conversión.');
+        }
+
+        if ($hasBom) {
+            fseek($raw, 3);
+        }
+
+        while (!feof($raw)) {
+            $chunk = fread($raw, 65536);
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            fwrite($temp, mb_convert_encoding($chunk, 'UTF-8', $encoding));
+        }
+        fclose($raw);
+        rewind($temp);
+
+        return [$temp, 0];
     }
 
     private static function detectSeparator($stream): string

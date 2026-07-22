@@ -65,15 +65,17 @@ class RoleProvider
      */
     public static function getRolesForUser(string $cedula, string $username = ''): array
     {
+        $roles = []; // Inicializamos el valor por defecto
         $cedula = self::normalizeCedula($cedula);
+
         if ($cedula === '' && $username === '') {
-            return [];
+            return $roles; // Retorno 1
         }
 
         $appAlias = $_ENV['EXTERNAL_ROLES_APP_ALIAS'] ?? '';
         if ($appAlias === '') {
             error_log('RoleProvider: falta EXTERNAL_ROLES_APP_ALIAS en el .env.');
-            return [];
+            return $roles; // Retorno 2
         }
 
         try {
@@ -101,14 +103,17 @@ class RoleProvider
                 'appAlias' => $appAlias,
             ])->fetchFirstColumn();
 
-            return array_values(array_filter(array_map(
+            // Asignamos a la variable en lugar de hacer un return inmediato
+            $roles = array_values(array_filter(array_map(
                 static fn($r) => trim((string)$r),
                 $rows
             )));
         } catch (\Throwable $e) {
             error_log('RoleProvider: error consultando roles para cédula=' . $cedula . ' username=' . $username . ': ' . $e->getMessage());
-            return [];
+            // No hacemos return aquí; el flujo continuará hacia el final
         }
+
+        return $roles; // Retorno 3 (Cubre el caso de éxito y el catch)
     }
 
     /**

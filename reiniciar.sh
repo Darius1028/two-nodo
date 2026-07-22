@@ -51,5 +51,5 @@ echo "[3/3] Mostrando últimos logs..."
 echo
 echo "=============================================="
 echo " Reinicio completado correctamente"
-echo " Aplicación: http://localhost"
+echo " Aplicación: http://localhost:8090"
 echo "=============================================="

@@ -14,17 +14,30 @@ final class RequestContext
 {
     public static function getClientIp(): string
     {
-        // Nginx corre delante como proxy inverso (ver docker-compose.yml),
-        // así que la IP real del cliente puede venir en X-Forwarded-For.
-        // Se toma la primera IP de la lista (la más cercana al cliente).
+        // 1. X-Forwarded-For: si hay otro proxy/balanceador delante de Nginx.
+        //    Se toma la primera IP de la lista (la más cercana al cliente).
         $forwarded = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? '';
         if (is_string($forwarded) && trim($forwarded) !== '') {
             $first = trim(explode(',', $forwarded)[0]);
             if ($first !== '') {
+                error_log('[RequestContext] IP via X-Forwarded-For: ' . $first);
                 return $first;
             }
         }
-        return $_SERVER['REMOTE_ADDR'] ?? '';
+
+        // 2. X-Real-IP: seteado explícitamente por nginx.conf en el bloque
+        //    fastcgi (fastcgi_param HTTP_X_REAL_IP $remote_addr).
+        $realIp = $_SERVER['HTTP_X_REAL_IP'] ?? '';
+        if (is_string($realIp) && trim($realIp) !== '') {
+            error_log('[RequestContext] IP via HTTP_X_REAL_IP: ' . trim($realIp));
+            return trim($realIp);
+        }
+
+        $remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '';
+        error_log('[RequestContext] IP via REMOTE_ADDR: "' . $remoteAddr . '"'
+            . ' | X-Forwarded-For: "' . ($forwarded) . '"'
+            . ' | X-Real-IP: "' . ($realIp) . '"');
+        return $remoteAddr;
     }
 
     public static function getClientHostname(): string

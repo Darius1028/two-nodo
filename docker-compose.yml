@@ -3,9 +3,6 @@ services:
     image: nginx:alpine
     container_name: academic_nginx
     ports:
-      # 8090 en el host, no 80 -- ese puerto ya lo usa el Apache de XAMPP
-      # (para WordPress) en esta máquina. El 80 de ADENTRO del contenedor
-      # no cambia, solo el mapeo hacia el host.
       - "8090:80"
     volumes:
       - ./public:/var/www/html/public:ro
@@ -18,32 +15,27 @@ services:
 
   php-app:
     image: academic-php:8.2-dev
-
     build:
       context: .
       dockerfile: docker/Dockerfile
-
     container_name: academic_php
-
     volumes:
-      # El código se actualiza sin reconstruir la imagen.
+      # Código fuente
       - .:/var/www/html
 
-      # Conserva vendor dentro de Docker.
+      # Vendor (este SÍ puede ser volumen de Docker, no se pierde)
       - vendor_data:/var/www/html/vendor
 
-      # Datos temporales de Symfony/aplicación.
-      - var_data:/var/www/html/var
+      # ✅ CAMBIO IMPORTANTE: Bind mount local para var (logs y cache)
+      # Así historial.json queda en tu disco C: y nunca se borrará.
+      - ./var:/var/www/html/var
 
     env_file:
       - .env
-
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "auth.local:host-gateway"
-
     restart: unless-stopped
-
     networks:
       - app-network
 
@@ -53,4 +45,4 @@ networks:
 
 volumes:
   vendor_data:
-  var_data:
+  #  ELIMINADO: var_data (ya no lo necesitamos)

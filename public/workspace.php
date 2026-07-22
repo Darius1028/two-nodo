@@ -70,6 +70,11 @@ function e($v): string {
         .iframe-container { width: 100%; flex: 1; min-height: 650px; border: none; background: #edf2f7; }
         .empty-view { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; color: #94a3b8; text-align: center; padding: 40px; }
         .empty-view span { font-size: 50px; margin-bottom: 10px; }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
+        .modal.active { display: flex; }
+        .modal-content { background: white; padding: 30px 25px; border-radius: 10px; max-width: 400px; width: 90%; box-shadow: 0 5px 20px rgba(0,0,0,0.25); text-align: center; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
     </style>
     <script>
         function requestPdfReload() {
@@ -98,19 +103,23 @@ function e($v): string {
             }
         }
 
-        // Acción EXPLÍCITA y separada de la vista previa -- archiva (con
-        // firma digital) el PDF en el Repositorio Documental institucional.
-        // Nunca se dispara automáticamente al mirar un expediente.
-        async function archivarEnRepositorio() {
-            const boton = document.getElementById('btnArchivar');
+        function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+
+        // Muestra el modal de confirmación (no usa confirm() nativo para no
+        // exponer rutas ni datos internos en el título del diálogo del OS).
+        function archivarEnRepositorio() {
             const cedula = document.getElementById('override_cedula').value;
             if (!cedula) {
                 alert('Ingresá una cédula primero.');
                 return;
             }
-            if (!confirm('¿Archivar y firmar este expediente en el Repositorio Documental institucional? Esta acción genera un documento oficial.')) {
-                return;
-            }
+            document.getElementById('archivarModal').classList.add('active');
+        }
+
+        // Ejecuta el archivo una vez confirmado desde el modal.
+        async function executeArchivar() {
+            closeModal('archivarModal');
+            const boton = document.getElementById('btnArchivar');
             boton.disabled = true;
             boton.textContent = 'Archivando…';
             try {
@@ -118,14 +127,14 @@ function e($v): string {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        cedula: cedula,
+                        cedula:     document.getElementById('override_cedula').value,
                         start_year: document.getElementById('start_year').value,
-                        end_year: document.getElementById('end_year').value,
-                        name: document.getElementById('override_nombre').value,
-                        email: document.getElementById('override_email').value,
-                        periodo: document.getElementById('override_periodo').value,
-                        extra1: document.getElementById('override_extra1').value,
-                        extra2: document.getElementById('override_extra2').value,
+                        end_year:   document.getElementById('end_year').value,
+                        name:       document.getElementById('override_nombre').value,
+                        email:      document.getElementById('override_email').value,
+                        periodo:    document.getElementById('override_periodo').value,
+                        extra1:     document.getElementById('override_extra1').value,
+                        extra2:     document.getElementById('override_extra2').value,
                     }),
                 });
                 const data = await response.json();
@@ -223,6 +232,20 @@ function e($v): string {
             <?php else: ?>
                 <iframe class="iframe-container" id="pdfIframe" style="display:none;" title="Visor PDF"></iframe>
             <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<div class="modal" id="archivarModal">
+    <div class="modal-content">
+        <h3 style="color:#003366; margin-bottom:15px;">Confirmar Archivo</h3>
+        <p style="margin-bottom:20px; color:#555;">
+            ¿Archivar y firmar este expediente en el Repositorio Documental institucional?<br><br>
+            <span style="color:#dc3545; font-weight:bold;">Esta acción genera un documento oficial.</span>
+        </p>
+        <div style="display:flex; gap:10px; justify-content:center;">
+            <button type="button" class="btn btn-secondary" onclick="closeModal('archivarModal')">Cancelar</button>
+            <button type="button" class="btn btn-primary" style="width:auto; padding:12px 24px;" onclick="executeArchivar()">Sí, Archivar</button>
         </div>
     </div>
 </div>

@@ -1,11 +1,13 @@
 <?php
-
 declare(strict_types=1);
 
 namespace App\Service;
 
+use App\Dto\DocumentUploadDto;
+use App\Exception\InvalidConfigurationException;
+use App\Exception\SystemException;
+use App\Exception\ValidationException;
 use JsonException;
-use RuntimeException;
 
 final class RepositorioDocumentalService
 {
@@ -18,13 +20,8 @@ final class RepositorioDocumentalService
             ?? getenv('REPOSITORIO_DOCUMENTAL_URL')
             ?: null;
 
-        if (
-            !is_string($endpointConfigurado)
-            || trim($endpointConfigurado) === ''
-        ) {
-            throw new RuntimeException(
-                'No se configuró REPOSITORIO_DOCUMENTAL_URL.'
-            );
+        if (!is_string($endpointConfigurado) || trim($endpointConfigurado) === '') {
+            throw new InvalidConfigurationException('No se configuró REPOSITORIO_DOCUMENTAL_URL.');
         }
 
         $this->endpoint = trim($endpointConfigurado);
@@ -33,70 +30,47 @@ final class RepositorioDocumentalService
     /**
      * @return array<string, mixed>
      */
-    public function subirPdf(
-        string $contenidoPdf,
-        string $nombreArchivo,
-        string $accessToken,
-        string $ipOrigen,
-        string $sistema = 'Permiso',
-        string $modulo = 'Tramite',
-        bool $requiereFirmado = true,
-        bool $requiereIndex = true
-    ): array {
+    public function subirPdf(DocumentUploadDto $dto): array
+    {
         if (!extension_loaded('curl')) {
-            throw new RuntimeException(
-                'La extensión cURL de PHP no está habilitada.'
-            );
+            throw new SystemException('La extensión cURL de PHP no está habilitada.');
         }
 
-        if ($contenidoPdf === '') {
-            throw new RuntimeException('El contenido del PDF está vacío.');
+        if ($dto->contenidoPdf === '') {
+            throw new ValidationException('El contenido del PDF está vacío.');
         }
 
-        if ($accessToken === '') {
-            throw new RuntimeException('No se recibió el access token.');
+        if ($dto->accessToken === '') {
+            throw new ValidationException('No se recibió el access token.');
         }
 
-        $nombreArchivo = basename($nombreArchivo);
-
+        $nombreArchivo = basename($dto->nombreArchivo);
         if (!str_ends_with(strtolower($nombreArchivo), '.pdf')) {
             $nombreArchivo .= '.pdf';
         }
 
         // Permite recibir "Bearer token" o solamente el token.
-        $accessToken = preg_replace(
-            '/^Bearer\s+/i',
-            '',
-            trim($accessToken)
-        ) ?? '';
+        $accessToken = preg_replace('/^Bearer\s+/i', '', trim($dto->accessToken)) ?? '';
 
         $payload = [
-            'sistema'          => $sistema,
-            'modulo'           => $modulo,
-            'requiereFirmado'  => $requiereFirmado ? 'S' : 'N',
-            'requiereIndex'    => $requiereIndex ? 'S' : 'N',
-            'ipOrigen'         => $ipOrigen,
+            'sistema'          => $dto->sistema,
+            'modulo'           => $dto->modulo,
+            'requiereFirmado'  => $dto->requiereFirmado ? 'S' : 'N',
+            'requiereIndex'    => $dto->requiereIndex ? 'S' : 'N',
+            'ipOrigen'         => $dto->ipOrigen,
             'nombreArchivo'    => $nombreArchivo,
-            'base64Archivo'    => base64_encode($contenidoPdf),
+            'base64Archivo'    => base64_encode($dto->contenidoPdf),
         ];
 
         try {
-            $json = json_encode(
-                $payload,
-                JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES
-            );
+            $json = json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
         } catch (JsonException $exception) {
-            throw new RuntimeException(
-                'No se pudo construir el JSON de la solicitud.',
-                0,
-                $exception
-            );
+            throw new SystemException('No se pudo construir el JSON de la solicitud.', 0, $exception);
         }
 
         $curl = curl_init($this->endpoint);
-
         if ($curl === false) {
-            throw new RuntimeException('No se pudo inicializar cURL.');
+            throw new SystemException('No se pudo inicializar cURL.');
         }
 
         curl_setopt_array($curl, [
@@ -109,8 +83,7 @@ final class RepositorioDocumentalService
             CURLOPT_TIMEOUT         => 90,
             CURLOPT_SSL_VERIFYPEER  => true,
             CURLOPT_SSL_VERIFYHOST  => 2,
-
-            CURLOPT_HTTPHEADER => [
+            CURLOPT_HTTPHEADER      => [
                 'Content-Type: application/json',
                 'Accept: application/json',
                 'Authorization: Bearer ' . $accessToken,
@@ -118,21 +91,12 @@ final class RepositorioDocumentalService
         ]);
 
         $response = curl_exec($curl);
-
-        $statusCode = (int) curl_getinfo(
-            $curl,
-            CURLINFO_HTTP_CODE
-        );
-
+        $statusCode = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
         $curlError = curl_error($curl);
-
         curl_close($curl);
 
         if ($response === false) {
-            throw new RuntimeException(
-                'Error consumiendo RepositorioDocumentalService: '
-                . $curlError
-            );
+            throw new SystemException('Error consumiendo RepositorioDocumentalService: ' . $curlError);
         }
 
         $decodedResponse = json_decode($response, true);
@@ -142,7 +106,7 @@ final class RepositorioDocumentalService
                 ? json_encode($decodedResponse, JSON_UNESCAPED_UNICODE)
                 : $response;
 
-            throw new RuntimeException(
+            throw new SystemException(
                 sprintf(
                     'RepositorioDocumentalService respondió HTTP %d: %s',
                     $statusCode,

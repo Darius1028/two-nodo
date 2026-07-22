@@ -13,7 +13,7 @@ use Doctrine\ORM\Event\PostUpdateEventArgs;
 use Doctrine\ORM\Events;
 
 /**
- * Registra automáticamente cada cambio de AcademicRecord en el esquema AUD.
+ * Registra automáticamente cada cambio de AcademicRecord en el esquema AcademicoAUD.
  * La escritura se hace por DBAL para evitar reentrar al UnitOfWork durante
  * flush() y para compartir la misma transacción que la operación principal.
  */

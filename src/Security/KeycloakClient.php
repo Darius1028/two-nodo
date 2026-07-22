@@ -3,8 +3,8 @@ declare(strict_types=1);
 
 namespace App\Security;
 
+use App\Exception\InvalidConfigurationException;
 use Jumbojett\OpenIDConnectClient;
-use RuntimeException;
 
 class KeycloakClient
 {
@@ -24,16 +24,16 @@ class KeycloakClient
         $appEnv       = trim((string)($_ENV['APP_ENV'] ?? 'prod'));
 
         if ($serverUrl === '') {
-            throw new RuntimeException('KEYCLOAK_SERVER_URL no está configurado.');
+            throw new InvalidConfigurationException('KEYCLOAK_SERVER_URL no está configurado.');
         }
         if ($realm === '') {
-            throw new RuntimeException('KEYCLOAK_REALM no está configurado.');
+            throw new InvalidConfigurationException('KEYCLOAK_REALM no está configurado.');
         }
         if ($clientId === '') {
-            throw new RuntimeException('KEYCLOAK_CLIENT_ID no está configurado.');
+            throw new InvalidConfigurationException('KEYCLOAK_CLIENT_ID no está configurado.');
         }
         if ($redirectUri === '') {
-            throw new RuntimeException('KEYCLOAK_REDIRECT_URI no está configurado.');
+            throw new InvalidConfigurationException('KEYCLOAK_REDIRECT_URI no está configurado.');
         }
 
         $issuer = sprintf('%s/realms/%s', rtrim($serverUrl, '/'), rawurlencode($realm));

@@ -22,11 +22,9 @@ class SecurityContext
             return null;
         }
         $tokens = $_SESSION[self::SESSION_TOKENS] ?? null;
-        if ($tokens === null || ($tokens['expires_at'] ?? 0) < time()) {
-            if (!self::refreshTokens()) {
-                self::clearSession();
-                return null;
-            }
+        if (($tokens === null || ($tokens['expires_at'] ?? 0) < time()) && !self::refreshTokens()) {
+            self::clearSession();
+            return null;
         }
         return $_SESSION[self::SESSION_USER];
     }
@@ -64,7 +62,30 @@ class SecurityContext
     public static function getCurrentUserId(): ?int
     {
         $user = self::getCurrentUser();
-        return $user['idUsuario'] ?? null;
+        if ($user === null) {
+            return null;
+        }
+
+        // Resolución lazy: si la sesión viene de antes de que se guardara
+        // idUsuario (por ejemplo, el usuario no cerró sesión después de un
+        // despliegue), se resuelve ahora y se guarda para las próximas
+        // llamadas dentro de la misma sesión.
+        if (!array_key_exists('idUsuario', $user)) {
+            error_log('[SecurityContext] idUsuario no está en sesión — resolviendo lazy'
+                . ' | cedula=' . ($user['cedula'] ?? '')
+                . ' | username=' . ($user['preferred_username'] ?? ''));
+            self::ensureSession();
+            $id = RoleProvider::getUsuarioId(
+                $user['cedula'] ?? '',
+                $user['preferred_username'] ?? ''
+            );
+            error_log('[SecurityContext] idUsuario resuelto lazy: ' . ($id === null ? 'null' : (string)$id));
+            $_SESSION[self::SESSION_USER]['idUsuario'] = $id;
+            return $id;
+        }
+
+        error_log('[SecurityContext] idUsuario desde sesión: ' . ($user['idUsuario'] === null ? 'null' : (string)$user['idUsuario']));
+        return $user['idUsuario'];
     }
 
     public static function requireRole(string $role): void
@@ -168,14 +189,6 @@ class SecurityContext
             $cedulaClaim = $_ENV['KEYCLOAK_CEDULA_CLAIM'] ?? 'cedula';
             $rawCedula = (string)($idToken->{$cedulaClaim} ?? $idToken->preferred_username ?? '');
 
-            // FIX: LDAP/AD puede entregar la cédula con guion
-            // ("050287128-8"), mientras que ADM.Persona.identificacion la
-            // guarda sin separadores ("0502871288"). Sin normalizar, el
-            // join en RoleProvider nunca encuentra la fila y el usuario
-            // queda siempre sin roles, sin ningún error visible.
-            // Si al sacar todo lo que no es dígito queda vacío (ej. cuando
-            // cae al fallback de preferred_username y ese no es numérico),
-            // se conserva el valor original tal cual.
             $cedulaDigits = preg_replace('/\D+/', '', $rawCedula);
             $cedula = $cedulaDigits !== '' ? $cedulaDigits : $rawCedula;
 

@@ -7,18 +7,20 @@ Sistema web para la gestión, consulta y certificación de registros académicos
 ## Características principales
 
 - **Gestión de registros** — CRUD completo de registros académicos por cédula, materia, período y año.
-- **Importación/Exportación CSV** — Carga masiva con detección automática de separadores y mapeo flexible de columnas.
-- **Validación previa de CSV** — Endpoint `validate_csv` que reporta errores antes de importar.
+- **Importación CSV en streaming** — Carga masiva sin cargar el archivo en RAM; detecta separador y encoding automáticamente. Soporta archivos de hasta 128 MB sin crashear el servidor.
+- **Exportación CSV** — Descarga de registros por año o por cédula.
+- **Validación previa de CSV** — Endpoint `validate_csv` que reporta errores de columnas antes de importar.
 - **Generación de PDFs** — Certificados con membrete, firma y código QR verificable.
 - **Archivo en Repositorio Documental** — Integración con el servicio institucional para archivar PDFs con firma digital.
 - **Verificación pública de certificados** — Endpoint sin login para validar QR desde portales externos, con rate limiting por IP.
 - **API REST JSON** — Endpoints para búsqueda, CRUD, importación CSV, generación y archivo de PDFs.
 - **Panel administrativo** — Interfaz HTML para gestión completa con control de acceso por roles.
-- **Auditoría automática** — Registro de todos los cambios (INSERT/UPDATE/DELETE) con usuario y timestamp.
+- **Auditoría estilo Envers** — Cada INSERT/UPDATE/DELETE (individual y masivo) genera un snapshot en `AcademicoAUD.RecordAcademico_AUD` vinculado a una revisión en `AUD.REVINFO`. Los registros AUD nunca se borran al eliminar el registro principal.
 - **Validación de datos** — Detección de emails corruptos, cédulas inválidas y calificaciones fuera de rango.
 - **Autenticación OAuth2/OIDC** — Integración con Keycloak, soporte para Single Logout y refresh de tokens.
 - **Autorización desacoplada** — Los roles **no** provienen del token de Keycloak; se consultan por cédula o username en la base institucional `PORTAL_APLICATIVOS_CJ` (esquema `ADM`).
 - **Manejo global de errores** — `ErrorHandler` registra como excepción todo error no controlado; el usuario nunca ve stack traces en producción.
+- **Página de error 403** — Página personalizada con redirección al sistema cuando se intenta acceder directamente a recursos protegidos.
 - **Rate limiting** — Protección por IP en endpoints públicos mediante archivo con file locking (sin Redis ni Memcached).
 
 ---
@@ -52,36 +54,55 @@ sistema-records/
 │   ├── callback.php           # Callback OAuth2 de Keycloak
 │   ├── login.php              # Página de login
 │   ├── logout.php             # Single Logout
+│   ├── 403.html               # Página de error de acceso denegado
 │   ├── diagnostico.php        # Diagnóstico de sistema (dev)
+│   ├── .htaccess              # Redirige errores 403 a 403.html
 │   └── assets/                # Imágenes (membrete, firma)
 ├── src/
 │   ├── Core/
 │   │   ├── EntityManagerProvider.php  # Bootstrap de Doctrine
-│   │   ├── AuditListener.php          # Listener de auditoría
+│   │   ├── AuditListener.php          # Listener de auditoría (postPersist/postUpdate/preRemove)
 │   │   ├── ErrorHandler.php           # Manejador global de excepciones
-│   │   └── RequestContext.php         # IP real del cliente (proxies)
-│   ├── Entity/                # Entidades Doctrine (AcademicRecord, Audit)
+│   │   └── RequestContext.php         # IP real del cliente (X-Real-IP → X-Forwarded-For → REMOTE_ADDR)
+│   ├── Doctrine/
+│   │   └── Type/
+│   │       └── SqlServerDateTimeType.php  # Tipo DATETIME compatible con SQL Server
+│   ├── Entity/
+│   │   ├── AcademicRecord.php             # Entidad principal (Academico.RecordAcademico)
+│   │   ├── AcademicRecordAudit.php        # Entidad AUD readOnly — patrón @Audited de Envers
+│   │   └── RevisionInfo.php               # Entidad de revisión (AUD.REVINFO)
+│   ├── Exception/
+│   │   ├── AppException.php               # Base de excepciones de la aplicación
+│   │   ├── ValidationException.php        # Error de validación de datos de entrada
+│   │   ├── SystemException.php            # Error de sistema (archivo ilegible, etc.)
+│   │   ├── NotFoundException.php          # Recurso no encontrado
+│   │   └── InvalidConfigurationException.php # Configuración inválida
 │   ├── Security/
 │   │   ├── KeycloakClient.php         # Cliente OIDC
-│   │   ├── SecurityContext.php        # Sesión, callback, logout, refresh
-│   │   ├── RoleProvider.php           # Roles desde base institucional externa
+│   │   ├── SecurityContext.php        # Sesión, callback, logout, refresh, idUsuario lazy
+│   │   ├── RoleProvider.php           # Roles e idUsuario desde base institucional externa
 │   │   └── RateLimiter.php            # Rate limiting por IP (archivo)
 │   └── Service/
-│       ├── CsvService.php             # Importación/exportación CSV
-│       ├── PdfService.php             # Generación y archivo de PDFs
-│       ├── ErrorFinder.php            # Detección de errores en datos
-│       ├── ConfigService.php          # Lectura de config.json
-│       └── KeycloakTokenService.php   # Token de servicio (client_credentials)
+│       ├── AcademicRecordAuditService.php  # Escribe en AUD via DBAL (individual)
+│       ├── CsvService.php                  # Importación/exportación CSV en streaming
+│       ├── PdfService.php                  # Generación y archivo de PDFs
+│       ├── RepositorioDocumentalService.php # Cliente del Repositorio Documental
+│       ├── ErrorFinder.php                 # Detección de errores en datos
+│       ├── ConfigService.php               # Lectura de config.json y env
+│       └── KeycloakTokenService.php        # Token de servicio (client_credentials)
 ├── templates/
 │   └── includes/header.php    # Header HTML compartido
 ├── config/
 │   ├── doctrine.php           # Configuración de Doctrine
 │   └── config.json            # Configuración de la aplicación
+├── database/
+│   └── create_schema.sql      # Script de creación de schemas y tablas (idempotente)
 ├── bin/
 │   └── console.php            # Consola de comandos Doctrine
 ├── docker/
 │   ├── Dockerfile             # PHP 8.2-FPM con driver SQL Server
-│   └── nginx.conf             # Configuración de Nginx
+│   ├── nginx.conf             # Configuración de Nginx (128M max body)
+│   └── uploads.ini            # Límites PHP: 128M upload, 512M memory_limit
 ├── docker-compose.yml
 ├── composer.json
 ├── reiniciar.sh               # Script para reiniciar contenedores
@@ -89,6 +110,48 @@ sistema-records/
 └── var/                       # Cache y logs (generado en instalación)
     ├── cache/
     └── log/
+```
+
+---
+
+## Esquema de base de datos
+
+El script `database/create_schema.sql` crea todos los schemas y tablas. Es **idempotente** (puede ejecutarse más de una vez sin errores).
+
+```
+AUD.REVINFO                          Schema AUD  — tabla de metadatos de revisión
+  REV       INT IDENTITY PK
+  REVTSTMP  BIGINT
+
+Academico.RecordAcademico            Schema Academico  — registros académicos
+  id        INT IDENTITY PK
+  cedula, nombre, email, materia, nota, total, periodo, anio, origen_tabla,
+  proceso, grupo_objetivo, modalidad, fecha_inicio, fecha_fin, aprueba,
+  estado, idPersonaCrea, fechaCrea, ipCrea(45), equipoCrea,
+  idPersonaModifica, fechaModifica, ipModifica(45), equipoModifica, motivoModifica
+  Índices: cedula, origen_tabla, materia, anio
+  Nota: ipCrea/ipModifica son VARCHAR(45) para soportar IPv6
+
+AcademicoAUD.RecordAcademico_AUD    Schema AcademicoAUD  — auditoría (snapshot por revisión)
+  id + REV  PK compuesta
+  REVTYPE   SMALLINT (0=INSERT, 1=UPDATE, 2=DELETE)
+  ...mismos campos que RecordAcademico (todos NULL)...
+  FK: REV → AUD.REVINFO.REV
+  Sin FK hacia RecordAcademico: los registros AUD sobreviven al borrado del principal
+```
+
+Para ejecutar el script:
+
+```sql
+-- En SQL Server Management Studio o sqlcmd:
+-- Ajustar el nombre de la BD en la primera línea si es diferente a record_academico_db
+```
+
+```bash
+# Desde el contenedor PHP:
+docker-compose exec php-app /opt/mssql-tools/bin/sqlcmd \
+  -S $DB_HOST -U $DB_USER -P $DB_PASS -d $DB_NAME \
+  -i database/create_schema.sql
 ```
 
 ---
@@ -134,6 +197,7 @@ cp .env.example .env
 | `KEYCLOAK_SERVER_URL` | URL base de Keycloak | `https://auth.ejemplo.com` |
 | `KEYCLOAK_REALM` | Nombre del realm | `cj-funcionarios` |
 | `KEYCLOAK_CLIENT_ID` | Client ID configurado en Keycloak | `record-academico-php` |
+| `KEYCLOAK_CLIENT_SECRET` | Secret del client de Keycloak | `abc123` |
 | `KEYCLOAK_REDIRECT_URI` | URL de callback tras login | `https://app.ejemplo.com/callback.php` |
 | `KEYCLOAK_ROLE_ADMIN` | Nombre del rol de administrador | `ADMIN_ACADEMICO` |
 | `KEYCLOAK_ROLE_USER` | Nombre del rol de usuario | `SECRE_ACADEMICO` |
@@ -152,7 +216,15 @@ Los roles **no** vienen del token de Keycloak. Se consultan en una base instituc
 | `EXTERNAL_ROLES_DB_NAME` | Base de datos | `PORTAL_APLICATIVOS_CJ` |
 | `EXTERNAL_ROLES_DB_USER` | Usuario | `USR_ADM_DES_ALL` |
 | `EXTERNAL_ROLES_DB_PASS` | Contraseña | `secret` |
-| `EXTERNAL_ROLES_APP_ALIAS` | Alias de esta app en `ADM.Aplicativo` | `RECORD_ACADEMICO` |
+| `EXTERNAL_ROLES_APP_ALIAS` | Alias de esta app en `ADM.Aplicativo` | `SEC-ACAD` |
+
+#### QR de verificación
+
+| Variable | Descripción | Ejemplo |
+|---|---|---|
+| `QR_BASE_URL` | URL base para los QR de verificación (se concatena la cédula) | `https://tu-dominio.com/verificar-record/` |
+
+> Esta variable tiene prioridad sobre `qr_base_url` en `config.json`. Úsala para cambiar la URL por entorno sin necesidad de modificar archivos del proyecto.
 
 #### Repositorio Documental
 
@@ -175,7 +247,7 @@ El archivo `config/config.json` controla opciones específicas de la aplicación
 ```
 
 - **`qr_enabled`** — Activa el código QR en los PDFs generados.
-- **`qr_base_url`** — URL base para los QR de verificación. Se concatena la cédula y es la misma URL que apunta al endpoint público `verify_certificate`.
+- **`qr_base_url`** — URL base de fallback para los QR. Si está definida `QR_BASE_URL` en el entorno, esta es ignorada.
 - **`letterhead_image`** — Ruta a la imagen del membrete (relativa a `public/`).
 - **`signature_image`** — Ruta a la imagen de la firma (relativa a `public/`).
 - **`column_schema`** — Define las columnas disponibles para importación CSV y visualización en PDF. Cada columna tiene `key`, `label`, `width` y `visible`.
@@ -211,31 +283,88 @@ docker-compose up -d --build
 docker-compose ps
 ```
 
-La aplicación estará disponible en `http://localhost`.
+La aplicación estará disponible en `http://localhost:8090`.
+
+> El puerto del host es **8090** (no 80) para evitar conflictos con otros servicios locales. El contenedor Nginx escucha en el puerto 80 internamente.
 
 ### Servicios Docker
 
 | Servicio | Imagen | Puerto | Descripción |
 |---|---|---|---|
-| `nginx` | nginx:alpine | `80` | Servidor web / proxy inverso |
+| `nginx` | nginx:alpine | `8090:80` | Servidor web / proxy inverso |
 | `php-app` | (Dockerfile local) | `9000` (interno) | PHP 8.2-FPM con driver SQL Server |
 
-### Base de datos
+### Límites de subida y memoria
 
-El sistema utiliza **Doctrine Migrations**. Para crear o actualizar el esquema:
+El archivo `docker/uploads.ini` configura PHP para importaciones CSV grandes:
 
-```bash
-# Ejecutar migraciones pendientes
-docker-compose exec php-app vendor/bin/doctrine-migrations migrate
-
-# Ver estado de migraciones
-docker-compose exec php-app vendor/bin/doctrine-migrations status
+```ini
+upload_max_filesize = 128M
+post_max_size       = 128M
+memory_limit        = 512M
+max_execution_time  = 300
+max_input_time      = 300
 ```
 
-Las tablas que gestiona el sistema son:
+Nginx también está configurado con `client_max_body_size 128M` en `docker/nginx.conf`. Ambos valores deben ser coherentes.
 
-- `academic_records` — Registros académicos principales.
-- `academic_records_audit` — Log de auditoría de cambios.
+> **Nota sobre memoria:** El import CSV usa streaming (`openStreamUtf8`): abre el archivo directo sin cargarlo en RAM. El pico de memoria es de ~5 MB para archivos UTF-8 independientemente del tamaño del archivo. El `memory_limit = 512M` cubre PHP-FPM, Doctrine y los batches de INSERT.
+
+### Resolución de IP real del cliente
+
+Nginx está configurado con el módulo `ngx_http_realip_module` para resolver la IP real detrás de proxies o redes internas. Los rangos `set_real_ip_from` cubren redes privadas (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) y la red Docker interna. Ajustar en `docker/nginx.conf` si el entorno tiene rangos distintos.
+
+`RequestContext::getClientIp()` aplica la siguiente prioridad:
+1. `X-Forwarded-For` (balanceador/proxy corporativo externo)
+2. `HTTP_X_REAL_IP` (seteado explícitamente por nginx vía fastcgi)
+3. `REMOTE_ADDR` (fallback directo)
+
+Las columnas `ipCrea` / `ipModifica` son `VARCHAR(45)` para soportar tanto IPv4 como IPv6.
+
+---
+
+## Auditoría (patrón Envers)
+
+El sistema implementa auditoría automática equivalente al patrón `@Audited` de Hibernate Envers.
+
+### Flujo de escritura
+
+| Operación | Ruta | Tabla AUD |
+|---|---|---|
+| INSERT individual | `postPersist` → `AcademicRecordAuditService` | escribe REVTYPE=0 |
+| UPDATE individual | `postUpdate` → `AcademicRecordAuditService` | escribe REVTYPE=1 |
+| DELETE individual | `preRemove` → `AcademicRecordAuditService` | escribe REVTYPE=2 antes del DELETE |
+| Import CSV masivo | `CsvService::bulkInsertAudit` | escribe REVTYPE=0 en batch |
+
+### Campos de trazabilidad del operador
+
+Todos los INSERT/UPDATE/DELETE — incluido el import CSV masivo — registran quién realizó la operación:
+
+| Campo | Origen |
+|---|---|
+| `idPersonaCrea` / `idPersonaModifica` | `ADM.Usuario.id` del usuario autenticado (`RoleProvider::getUsuarioId`) |
+| `ipCrea` / `ipModifica` | IP real del cliente (`RequestContext::getClientIp`) |
+| `equipoCrea` / `equipoModifica` | Hostname resuelto por DNS inverso de la IP |
+
+`SecurityContext::getCurrentUserId()` resuelve el ID de forma **lazy**: si la sesión no tiene `idUsuario` (por ejemplo, el usuario no cerró sesión tras un despliegue), lo consulta en la base externa y lo guarda en sesión para la misma visita.
+
+### Garantías
+
+- Los registros de `AcademicoAUD.RecordAcademico_AUD` **nunca se modifican ni eliminan** al operar sobre la tabla principal — no existe FK hacia `Academico.RecordAcademico`.
+- Toda escritura AUD usa la **misma transacción** DBAL que la operación principal: si algo falla, el rollback deshace tanto el dato como la auditoría.
+- `AcademicRecordAudit` tiene `readOnly: true` en Doctrine: el ORM nunca hace flush sobre la tabla AUD.
+- La entidad `AcademicRecordAudit` es la única fuente de verdad del mapeo de columnas (`fromRecord()`, `fromRawRow()`, `toInsertArray()`).
+
+### Equivalencia con Hibernate Envers
+
+| Java / Hibernate Envers | Este proyecto |
+|---|---|
+| `@Audited` en la entidad | `AuditListener` registrado en `doctrine.php` |
+| Interceptor de eventos | `AuditListener` (postPersist / postUpdate / preRemove) |
+| Crea copia interna | `AcademicRecordAudit::fromRecord()` |
+| Inserta vía JDBC SQL | `AcademicRecordAuditService` via DBAL |
+| `@RevisionEntity` / `REVINFO` | `RevisionInfo` / `AUD.REVINFO` |
+| Tabla `_AUD` read-only por ORM | `readOnly: true` en `#[ORM\Entity]` |
 
 ---
 
@@ -339,6 +468,9 @@ docker-compose down -v
 - Control de acceso basado en roles resueltos desde la base institucional (`RoleProvider`), no desde el token de Keycloak.
 - `ErrorHandler` impide que stack traces o rutas internas lleguen al usuario final en producción.
 - Rate limiting por IP en endpoints públicos (sin Redis: archivo con file locking).
+- Página de error 403 personalizada (`public/403.html`) con redirección al sistema; no expone rutas internas.
+- Los diálogos de confirmación usan modales propios (no `window.confirm()` nativo), evitando que el título del diálogo del SO exponga rutas o URLs internas del servidor.
+- Jerarquía de excepciones (`AppException` → `ValidationException`, `SystemException`, `NotFoundException`, `InvalidConfigurationException`) para distinguir errores de validación de errores de sistema sin exponer detalles técnicos al usuario.
 - La variable `APP_DEBUG=false` es obligatoria en producción.
 - En producción, configurar `DB_ENCRYPT=true` y `TrustServerCertificate=false` en la conexión SQL Server.
 

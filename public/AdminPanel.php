@@ -83,7 +83,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $messageType = 'success';
                     CsvService::logHistory('Eliminación Masiva', "Se eliminaron $count registros del año $year.");
                 } catch (\Throwable $e) {
-                    if ($conn->isTransactionActive()) $conn->rollBack();
+                    if ($conn->isTransactionActive()) { $conn->rollBack(); }
                     $message = 'Error: ' . $e->getMessage();
                     $messageType = 'error';
                 }
@@ -96,7 +96,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     break;
                 }
                 $year = (int)($_POST['import_year'] ?? date('Y'));
-                $result = CsvService::importCSV($_FILES['csv_file']['tmp_name'], $year);
+
+                // ✅ CORRECCIÓN: Pasar explícitamente el usuario, IP y hostname
+                $result = CsvService::importCSV(
+                        $_FILES['csv_file']['tmp_name'],
+                        $year,
+                        SecurityContext::getCurrentUserId() ?? 0,
+                        RequestContext::getClientIp(),
+                        RequestContext::getClientHostname()
+                );
+
                 $message = $result['success']
                         ? 'Importación exitosa: ' . $result['imported'] . ' registros.'
                         : 'Fallo: ' . implode('; ', $result['errors']);
@@ -204,7 +213,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $message = 'Error en subida.'; $messageType = 'error'; break;
                 }
                 $targetDir = __DIR__ . '/assets/';
-                if (!is_dir($targetDir)) mkdir($targetDir, 0755, true);
+                if (!is_dir($targetDir)) { mkdir($targetDir, 0755, true); }
                 $targetFile = $targetDir . ($assetType === 'letterhead' ? 'letterhead.png' : 'signature.png');
                 if (move_uploaded_file($_FILES['asset_file']['tmp_name'], $targetFile)) {
                     $cfg = ConfigService::get();

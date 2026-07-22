@@ -24,6 +24,8 @@ SecurityContext::ensureSession();
 
 define('METHOD_NOT_ALLOWED', 'Method not allowed');
 define('YEAR_ID_REQUIRED', 'Year and ID parameters required');
+define('QUERY_CEDULA', 'r.cedula = :cedula');
+define('MSG_NOT_FOUND', 'Record not found');
 
 $allowedOrigins = ['https://escuela.funcionjudicial.gob.ec'];
 if (isset($_SERVER['HTTP_ORIGIN']) && in_array($_SERVER['HTTP_ORIGIN'], $allowedOrigins, true)) {
@@ -51,7 +53,9 @@ $getString = static function (array $source, string $key, string $default = ''):
 
 $rawInput = file_get_contents('php://input');
 $input = is_string($rawInput) ? (json_decode($rawInput, true) ?? []) : [];
-if (!is_array($input)) $input = [];
+if (!is_array($input)) {
+    $input = [];
+}
 
 $action = $getString($_GET, 'action', $getString($input, 'action'));
 
@@ -77,16 +81,25 @@ $requireAdminJson = static function () use ($respond): array {
 try {
     switch ($action) {
         case 'me':
+            // DEBUG TEMPORAL - ELIMINAR DESPUÉS
+            error_log('DEBUG_IP_HEADERS: ' . json_encode([
+                    'REMOTE_ADDR' => $_SERVER['REMOTE_ADDR'] ?? null,
+                    'HTTP_X_FORWARDED_FOR' => $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null,
+                    'HTTP_X_REAL_IP' => $_SERVER['HTTP_X_REAL_IP'] ?? null,
+                    'HTTP_CF_CONNECTING_IP' => $_SERVER['HTTP_CF_CONNECTING_IP'] ?? null,
+                ], JSON_PRETTY_PRINT));
+            // FIN DEBUG
             $user = SecurityContext::getCurrentUser();
             if ($user === null) {
                 $respond(['success' => false, 'error' => 'Not authenticated'], 401);
             }
             $respond(['success' => true, 'user' => [
                 'username' => $user['preferred_username'] ?? '',
-                'email'    => $user['email'] ?? '',
-                'name'     => $user['name'] ?? '',
-                'roles'    => $user['client_roles'] ?? [],
+                'email' => $user['email'] ?? '',
+                'name' => $user['name'] ?? '',
+                'roles' => $user['client_roles'] ?? [],
             ]]);
+            break;
 
         case 'search':
             SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');
@@ -97,10 +110,11 @@ try {
             $em = EntityManagerProvider::get();
             $qb = $em->createQueryBuilder()
                 ->select('r')->from(AcademicRecord::class, 'r')
-                ->where('r.cedula = :cedula')->setParameter('cedula', $cedula)
+                ->where(QUERY_CEDULA)->setParameter('cedula', $cedula)
                 ->orderBy('r.origen_tabla', 'DESC');
             $records = array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
             $respond(['success' => true, 'cedula' => $cedula, 'count' => count($records), 'records' => $records]);
+            break;
 
         case 'get_record':
             SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');
@@ -111,14 +125,15 @@ try {
             $em = EntityManagerProvider::get();
             $record = $em->getRepository(AcademicRecord::class)->find($id);
             if ($record === null) {
-                $respond(['success' => false, 'error' => 'Record not found'], 404);
+                $respond(['success' => false, 'error' => MSG_NOT_FOUND], 404);
             }
             $respond(['success' => true, 'record' => $record->toArray()]);
+            break;
 
         case 'list_records':
             SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');
-            $year   = $getInt($_GET, 'year', $getInt($input, 'year', (int)date('Y')));
-            $limit  = max(1, min(500, $getInt($_GET, 'limit', $getInt($input, 'limit', 50))));
+            $year = $getInt($_GET, 'year', $getInt($input, 'year', (int)date('Y')));
+            $limit = max(1, min(500, $getInt($_GET, 'limit', $getInt($input, 'limit', 50))));
             $offset = max(0, $getInt($_GET, 'offset', $getInt($input, 'offset', 0)));
 
             $em = EntityManagerProvider::get();
@@ -138,6 +153,7 @@ try {
                 'success' => true, 'year' => $year, 'total' => $total,
                 'limit' => $limit, 'offset' => $offset, 'records' => $records,
             ]);
+            break;
 
         case 'insert_record':
             $requireAdminJson();
@@ -145,8 +161,8 @@ try {
                 $respond(['success' => false, 'error' => METHOD_NOT_ALLOWED], 405);
             }
             $year = $getInt($input, 'year', (int)date('Y'));
-            $cedula  = $getString($input, 'cedula');
-            $nombre  = $getString($input, 'nombre');
+            $cedula = $getString($input, 'cedula');
+            $nombre = $getString($input, 'nombre');
             $materia = $getString($input, 'materia');
             if ($cedula === '' || $nombre === '' || $materia === '') {
                 $respond(['success' => false, 'error' => 'Required fields: cedula, nombre, materia'], 400);
@@ -154,14 +170,14 @@ try {
             $em = EntityManagerProvider::get();
             $record = new AcademicRecord();
             $record->fill([
-                'cedula'       => $cedula,
-                'nombre'       => $nombre,
-                'materia'      => $materia,
-                'email'        => $getString($input, 'email'),
-                'nota'         => $input['nota']  ?? null,
-                'total'        => $input['total'] ?? null,
-                'periodo'      => $getString($input, 'periodo'),
-                'anio'         => $year,
+                'cedula' => $cedula,
+                'nombre' => $nombre,
+                'materia' => $materia,
+                'email' => $getString($input, 'email'),
+                'nota' => $input['nota'] ?? null,
+                'total' => $input['total'] ?? null,
+                'periodo' => $getString($input, 'periodo'),
+                'anio' => $year,
                 'origen_tabla' => (string)$year,
             ]);
             $record->setAuditoriaCreacion(
@@ -173,6 +189,7 @@ try {
             $em->flush();
             CsvService::logHistory('Alta Manual', "Registro creado para cédula $cedula (año $year).");
             $respond(['success' => true, 'id' => $record->getId()]);
+            break;
 
         case 'update_record':
             $requireAdminJson();
@@ -186,14 +203,14 @@ try {
             $em = EntityManagerProvider::get();
             $record = $em->getRepository(AcademicRecord::class)->find($id);
             if ($record === null) {
-                $respond(['success' => false, 'error' => 'Record not found'], 404);
+                $respond(['success' => false, 'error' => MSG_NOT_FOUND], 404);
             }
             $record->fill([
-                'nombre'  => $getString($input, 'nombre'),
-                'email'   => $getString($input, 'email'),
+                'nombre' => $getString($input, 'nombre'),
+                'email' => $getString($input, 'email'),
                 'materia' => $getString($input, 'materia'),
-                'nota'    => isset($input['nota']) && $input['nota'] !== '' ? $input['nota'] : null,
-                'total'   => isset($input['total']) && $input['total'] !== '' ? $input['total'] : null,
+                'nota' => isset($input['nota']) && $input['nota'] !== '' ? $input['nota'] : null,
+                'total' => isset($input['total']) && $input['total'] !== '' ? $input['total'] : null,
                 'periodo' => $getString($input, 'periodo'),
             ]);
             $record->setAuditoriaModificacion(
@@ -204,6 +221,7 @@ try {
             );
             $em->flush();
             $respond(['success' => true]);
+            break;
 
         case 'delete_record':
             $requireAdminJson();
@@ -217,15 +235,17 @@ try {
             $em = EntityManagerProvider::get();
             $record = $em->getRepository(AcademicRecord::class)->find($id);
             if ($record === null) {
-                $respond(['success' => false, 'error' => 'Record not found'], 404);
+                $respond(['success' => false, 'error' => MSG_NOT_FOUND], 404);
             }
             $em->remove($record);
             $em->flush();
             CsvService::logHistory('Eliminación', "Registro #$id eliminado.");
             $respond(['success' => true]);
+            break;
 
         case 'get_years':
             $respond(['success' => true, 'years' => ErrorFinder::getAvailableYears()]);
+            break;
 
         case 'check_errors':
             SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO');
@@ -242,6 +262,7 @@ try {
                 $errors = array_merge(...array_values($all));
             }
             $respond(['success' => true, 'year' => $year, 'count' => count($errors), 'errors' => $errors]);
+            break;
 
         case 'error_summary':
             SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO');
@@ -250,6 +271,7 @@ try {
                 ? ErrorFinder::getErrorSummary((int)$yearParam)
                 : ErrorFinder::getErrorSummaryAllYears();
             $respond(['success' => true, 'summary' => $summary]);
+            break;
 
         case 'import_csv':
             $requireAdminJson();
@@ -260,7 +282,14 @@ try {
             if (!isset($_FILES['csv_file']) || $_FILES['csv_file']['error'] !== UPLOAD_ERR_OK) {
                 $respond(['success' => false, 'error' => 'CSV file required'], 400);
             }
-            $respond(CsvService::importCSV($_FILES['csv_file']['tmp_name'], $year));
+            $respond(CsvService::importCSV(
+                $_FILES['csv_file']['tmp_name'],
+                $year,
+                SecurityContext::getCurrentUserId() ?? 0,
+                RequestContext::getClientIp(),
+                RequestContext::getClientHostname()
+            ));
+            break;
 
         case 'validate_csv':
             $requireAdminJson();
@@ -271,10 +300,11 @@ try {
                 $respond(['success' => false, 'error' => 'CSV file required'], 400);
             }
             $respond(CsvService::validateCSV($_FILES['csv_file']['tmp_name']));
+            break;
 
         case 'export_csv':
             SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO');
-            $year   = $getInt($_GET, 'year', $getInt($input, 'year', (int)date('Y')));
+            $year = $getInt($_GET, 'year', $getInt($input, 'year', (int)date('Y')));
             $cedula = $getString($_GET, 'cedula', $getString($input, 'cedula'));
             $outputPath = sys_get_temp_dir() . "/export_{$year}_" . date('YmdHis') . '.csv';
             $result = CsvService::exportCSV($year, $outputPath, $cedula);
@@ -287,16 +317,19 @@ try {
             }
             $errorMsg = implode('; ', $result['errors'] ?? ['Unknown error']);
             $respond(['success' => false, 'error' => 'Export failed: ' . $errorMsg], 500);
+            break;
 
         case 'get_config':
             $config = ConfigService::get();
             unset($config['admin_code']);
             $respond(['success' => true, 'config' => $config]);
+            break;
 
         case 'get_history':
             SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO');
             $limit = max(1, min(500, $getInt($_GET, 'limit', 50)));
             $respond(['success' => true, 'history' => CsvService::getHistory($limit)]);
+            break;
 
         case 'generate_pdf':
             SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');
@@ -307,16 +340,16 @@ try {
             $em = EntityManagerProvider::get();
             $count = (int)$em->createQueryBuilder()
                 ->select('COUNT(r.id)')->from(AcademicRecord::class, 'r')
-                ->where('r.cedula = :cedula')->setParameter('cedula', $cedula)
+                ->where(QUERY_CEDULA)->setParameter('cedula', $cedula)
                 ->getQuery()->getSingleScalarResult();
             if ($count === 0) {
                 $respond(['success' => false, 'error' => 'No records found for this cedula'], 404);
             }
             $respond([
-                'success'      => true,
-                'cedula'       => $cedula,
+                'success' => true,
+                'cedula' => $cedula,
                 'record_count' => $count,
-                'pdf_url'      => 'PdfGenerator.php?cedula_query=' . urlencode($cedula),
+                'pdf_url' => 'PdfGenerator.php?cedula_query=' . urlencode($cedula),
             ]);
 
         // Endpoint PÚBLICO a propósito -- lo consume el validador de QR de
@@ -338,7 +371,7 @@ try {
             $rows = $em->createQueryBuilder()
                 ->select('r.nombre', 'r.materia', 'r.origen_tabla')
                 ->from(AcademicRecord::class, 'r')
-                ->where('r.cedula = :cedula')->setParameter('cedula', $cedula)
+                ->where(QUERY_CEDULA)->setParameter('cedula', $cedula)
                 ->orderBy('r.origen_tabla', 'DESC')
                 ->getQuery()->getArrayResult();
 
@@ -359,9 +392,9 @@ try {
             }
 
             $respond([
-                'success'   => true,
-                'cedula'    => $cedula,
-                'nombre'    => $rows[0]['nombre'],
+                'success' => true,
+                'cedula' => $cedula,
+                'nombre' => $rows[0]['nombre'],
                 'historial' => $historial,
             ]);
 
@@ -378,24 +411,24 @@ try {
                 $respond(['success' => false, 'error' => 'Cedula required'], 400);
             }
             $startYear = $getInt($input, 'start_year', 2010);
-            $endYear   = $getInt($input, 'end_year', (int)date('Y'));
+            $endYear = $getInt($input, 'end_year', (int)date('Y'));
 
             try {
                 $tokenService = new KeycloakTokenService();
                 $accessToken = $tokenService->obtenerAccessToken();
 
                 $options = [
-                    'start_year'       => $startYear,
-                    'end_year'         => $endYear,
-                    'override_name'    => $getString($input, 'name')    ?: null,
-                    'override_email'   => $getString($input, 'email')   ?: null,
+                    'start_year' => $startYear,
+                    'end_year' => $endYear,
+                    'override_name' => $getString($input, 'name') ?: null,
+                    'override_email' => $getString($input, 'email') ?: null,
                     'override_periodo' => $getString($input, 'periodo') ?: null,
-                    'extra1'           => $getString($input, 'extra1')  ?: null,
-                    'extra2'           => $getString($input, 'extra2')  ?: null,
-                    'sistema'          => 'SistemaRecordAcademico',
-                    'modulo'           => 'ExpedienteAcademico',
+                    'extra1' => $getString($input, 'extra1') ?: null,
+                    'extra2' => $getString($input, 'extra2') ?: null,
+                    'sistema' => 'SistemaRecordAcademico',
+                    'modulo' => 'ExpedienteAcademico',
                     'requiere_firmado' => true,
-                    'requiere_index'   => true,
+                    'requiere_index' => true,
                 ];
 
                 $pdfService = new PdfService();
@@ -409,37 +442,38 @@ try {
                 CsvService::logHistory('Archivo Documental', "PDF de cédula $cedula archivado en el Repositorio Documental.");
 
                 $respond([
-                    'success'     => true,
-                    'message'     => 'PDF generado y archivado correctamente.',
+                    'success' => true,
+                    'message' => 'PDF generado y archivado correctamente.',
                     'repositorio' => $resultado,
                 ]);
             } catch (\Throwable $e) {
                 error_log('Error archivando PDF en Repositorio Documental: ' . $e->getMessage());
                 $respond(['success' => false, 'error' => $e->getMessage()], 500);
             }
+            break;
 
         default:
             $respond([
-                'name'    => 'Academic Record System API',
+                'name' => 'Academic Record System API',
                 'version' => '2.1',
                 'endpoints' => [
-                    'GET /api.php?action=me'                                           => 'Datos del usuario autenticado',
-                    'GET /api.php?action=search&cedula=12345678'                       => 'Buscar registros por cédula',
-                    'GET /api.php?action=get_record&id=1'                              => 'Obtener un registro por ID',
-                    'GET /api.php?action=list_records&year=2024&limit=50&offset=0'     => 'Listar registros por año (paginado)',
-                    'POST /api.php?action=insert_record'                               => 'Crear registro (admin)',
-                    'PUT /api.php?action=update_record'                                => 'Actualizar registro (admin)',
-                    'DELETE /api.php?action=delete_record&id=1'                        => 'Eliminar registro (admin)',
-                    'GET /api.php?action=get_years'                                    => 'Años disponibles',
-                    'GET /api.php?action=check_errors&year=2024&type=comma_emails'     => 'Chequeo de errores (admin)',
-                    'GET /api.php?action=error_summary&year=2024'                      => 'Resumen de errores (admin)',
-                    'POST /api.php?action=import_csv'                                  => 'Importar CSV (admin)',
-                    'POST /api.php?action=validate_csv'                                => 'Validar CSV (admin)',
-                    'GET /api.php?action=export_csv&year=2024'                         => 'Exportar CSV (admin)',
-                    'GET /api.php?action=get_config'                                   => 'Configuración pública del sistema',
-                    'GET /api.php?action=get_history&limit=50'                         => 'Bitácora (admin)',
-                    'GET /api.php?action=generate_pdf&cedula=12345678'                 => 'Info previa a generar PDF',
-                    'GET /api.php?action=verify_certificate&cedula=12345678'           => 'Verificación pública de certificado (sin login, para el QR)',
+                    'GET /api.php?action=me' => 'Datos del usuario autenticado',
+                    'GET /api.php?action=search&cedula=12345678' => 'Buscar registros por cédula',
+                    'GET /api.php?action=get_record&id=1' => 'Obtener un registro por ID',
+                    'GET /api.php?action=list_records&year=2024&limit=50&offset=0' => 'Listar registros por año (paginado)',
+                    'POST /api.php?action=insert_record' => 'Crear registro (admin)',
+                    'PUT /api.php?action=update_record' => 'Actualizar registro (admin)',
+                    'DELETE /api.php?action=delete_record&id=1' => 'Eliminar registro (admin)',
+                    'GET /api.php?action=get_years' => 'Años disponibles',
+                    'GET /api.php?action=check_errors&year=2024&type=comma_emails' => 'Chequeo de errores (admin)',
+                    'GET /api.php?action=error_summary&year=2024' => 'Resumen de errores (admin)',
+                    'POST /api.php?action=import_csv' => 'Importar CSV (admin)',
+                    'POST /api.php?action=validate_csv' => 'Validar CSV (admin)',
+                    'GET /api.php?action=export_csv&year=2024' => 'Exportar CSV (admin)',
+                    'GET /api.php?action=get_config' => 'Configuración pública del sistema',
+                    'GET /api.php?action=get_history&limit=50' => 'Bitácora (admin)',
+                    'GET /api.php?action=generate_pdf&cedula=12345678' => 'Info previa a generar PDF',
+                    'GET /api.php?action=verify_certificate&cedula=12345678' => 'Verificación pública de certificado (sin login, para el QR)',
                 ],
             ]);
     }
