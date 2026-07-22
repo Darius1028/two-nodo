@@ -19,6 +19,11 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     container_name: academic_php
+    command: >-
+      sh -c "mkdir -p /var/www/html/var/cache /var/www/html/var/log
+      && chown -R www-data:www-data /var/www/html/var
+      && chmod -R ug+rwX /var/www/html/var
+      && exec php-fpm"
     volumes:
       # Código fuente
       - .:/var/www/html

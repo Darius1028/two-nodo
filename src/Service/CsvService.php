@@ -447,24 +447,34 @@ class CsvService
 
     public static function logHistory(string $action, string $details): void
     {
-        $path = ConfigService::getHistorialPath();
-        $dir = dirname($path);
-        if (!is_dir($dir)) {
-            mkdir($dir, 0775, true);
+        try {
+            $path = ConfigService::getHistorialPath();
+            $dir = dirname($path);
+            if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+                throw new \RuntimeException("No se pudo crear el directorio de historial: {$dir}");
+            }
+
+            $history = file_exists($path)
+                ? (json_decode((string)file_get_contents($path), true) ?? [])
+                : [];
+            if (!is_array($history)) {
+                $history = [];
+            }
+            array_unshift($history, [
+                'timestamp' => date('Y-m-d H:i:s'),
+                'action'    => $action,
+                'details'   => $details,
+            ]);
+            $history = array_slice($history, 0, 100);
+
+            $json = json_encode($history, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+            if (file_put_contents($path, $json, LOCK_EX) === false) {
+                throw new \RuntimeException("No se pudo escribir el historial: {$path}");
+            }
+        } catch (\Throwable $e) {
+            // El historial es secundario: nunca debe convertir una operación exitosa en un fallo.
+            error_log(sprintf('No se pudo registrar el historial (%s): %s', $action, $e->getMessage()));
         }
-        $history = file_exists($path)
-            ? (json_decode((string)file_get_contents($path), true) ?? [])
-            : [];
-        if (!is_array($history)) {
-            $history = [];
-        }
-        array_unshift($history, [
-            'timestamp' => date('Y-m-d H:i:s'),
-            'action'    => $action,
-            'details'   => $details,
-        ]);
-        $history = array_slice($history, 0, 100);
-        file_put_contents($path, json_encode($history, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 
     private static function normalizeString(mixed $str): string

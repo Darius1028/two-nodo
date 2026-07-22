@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Exception\AppException;
 use ErrorException;
 use Throwable;
 
@@ -35,7 +34,7 @@ final class ErrorHandler
             if (!(error_reporting() & $severity)) {
                 return false; // silenciado con @ o por error_reporting()
             }
-            throw new AppException($message, 0, $severity, $file, $line);
+            throw new ErrorException($message, 0, $severity, $file, $line);
         });
 
         set_exception_handler([self::class, 'handle']);
