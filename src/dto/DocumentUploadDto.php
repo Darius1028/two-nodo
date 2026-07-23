@@ -14,9 +14,10 @@ readonly class DocumentUploadDto
         public string $nombreArchivo,
         public string $accessToken,
         public string $ipOrigen,
-        public string $sistema = 'Permiso',
-        public string $modulo = 'Tramite',
-        public bool $requiereFirmado = true,
-        public bool $requiereIndex = true
+        public string $tipo = 'Nuevo',
+        public string $sistema = 'SISTEMA RECORD ACADEMICO',
+        public string $modulo = 'Record Academico',
+        public string $requiereFirmado = 'N',
+        public string $requiereIndex = 'N'
     ) {}
 }

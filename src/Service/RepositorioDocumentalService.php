@@ -53,13 +53,16 @@ final class RepositorioDocumentalService
         $accessToken = preg_replace('/^Bearer\s+/i', '', trim($dto->accessToken)) ?? '';
 
         $payload = [
+            'tipo'             => $dto->tipo,
             'sistema'          => $dto->sistema,
             'modulo'           => $dto->modulo,
-            'requiereFirmado'  => $dto->requiereFirmado ? 'S' : 'N',
-            'requiereIndex'    => $dto->requiereIndex ? 'S' : 'N',
+            'requiereFirmado'  => strtoupper($dto->requiereFirmado) === 'S' ? 'S' : 'N',
+            'requiereIndex'    => strtoupper($dto->requiereIndex) === 'S' ? 'S' : 'N',
             'ipOrigen'         => $dto->ipOrigen,
             'nombreArchivo'    => $nombreArchivo,
-            'base64Archivo'    => base64_encode($dto->contenidoPdf),
+            // El Repositorio Documental espera el Base64 codificado para URL
+            // aun cuando el valor se envía dentro de un cuerpo JSON.
+            'base64Archivo'    => rawurlencode(base64_encode($dto->contenidoPdf)),
         ];
 
         try {
@@ -116,12 +119,43 @@ final class RepositorioDocumentalService
         }
 
         if (!is_array($decodedResponse)) {
+            // Este servicio responde el identificador documental como texto
+            // plano (por ejemplo: 20260723-132429892857-...), no como JSON.
+            $identificador = trim(is_string($decodedResponse) ? $decodedResponse : $response);
+
             return [
-                'httpStatus' => $statusCode,
-                'respuesta'  => $response,
+                'httpStatus'     => $statusCode,
+                'uuidRepositorio' => mb_substr($identificador, 0, 100),
+                'respuesta'      => $response,
             ];
         }
 
         return $decodedResponse;
+    }
+
+    /**
+     * Obtiene el identificador documental sin acoplar el sistema a una sola
+     * envoltura JSON del servicio (algunos ambientes responden dentro de data).
+     */
+    public static function extraerUuid(array $response): string
+    {
+        $keys = ['uuidRepositorio', 'uuid', 'uuidDocumento', 'documentUuid', 'idDocumento'];
+        foreach ($keys as $key) {
+            $value = $response[$key] ?? null;
+            if (is_string($value) && trim($value) !== '') {
+                return mb_substr(trim($value), 0, 100);
+            }
+        }
+
+        foreach ($response as $value) {
+            if (is_array($value)) {
+                $uuid = self::extraerUuid($value);
+                if ($uuid !== '') {
+                    return $uuid;
+                }
+            }
+        }
+
+        return '';
     }
 }

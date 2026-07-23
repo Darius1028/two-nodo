@@ -12,12 +12,14 @@ $dotenv->safeLoad();
 use App\Core\EntityManagerProvider;
 use App\Core\RequestContext;
 use App\Entity\AcademicRecord;
+use App\Entity\AcademicDocument;
 use App\Security\RateLimiter;
 use App\Security\SecurityContext;
 use App\Service\ConfigService;
 use App\Service\CsvService;
 use App\Service\ErrorFinder;
 use App\Service\PdfService;
+use App\Service\RepositorioDocumentalService;
 
 SecurityContext::ensureSession();
 
@@ -398,7 +400,7 @@ try {
             ]);
 
         // Acción EXPLÍCITA y separada de la vista previa: genera el PDF y
-        // lo archiva (con firma digital) en el Repositorio Documental
+        // lo archiva en el Repositorio Documental
         // institucional. Nunca se dispara solo por mirar un expediente.
         case 'archive_pdf':
             SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_USER'] ?? 'SECRE_ACADEMICO');
@@ -420,6 +422,28 @@ try {
             }
 
             try {
+                if ($startYear > $endYear) {
+                    throw new \InvalidArgumentException('El año inicial no puede ser mayor que el año final.');
+                }
+
+                $em = EntityManagerProvider::get();
+                $qb = $em->createQueryBuilder()
+                    ->select('r')
+                    ->from(AcademicRecord::class, 'r')
+                    ->where('r.cedula = :cedula')
+                    ->setParameter('cedula', $cedula)
+                    ->andWhere('r.origen_tabla >= :startYear')
+                    ->setParameter('startYear', (string) $startYear)
+                    ->andWhere('r.origen_tabla <= :endYear')
+                    ->setParameter('endYear', (string) $endYear)
+                    ->orderBy('r.origen_tabla', 'DESC')
+                    ->addOrderBy('r.id', 'DESC')
+                    ->setMaxResults(1);
+                $academicRecord = $qb->getQuery()->getOneOrNullResult();
+                if (!$academicRecord instanceof AcademicRecord) {
+                    throw new \RuntimeException('No existe un registro académico al cual asociar el documento.');
+                }
+
                 $options = [
                     'start_year' => $startYear,
                     'end_year' => $endYear,
@@ -428,26 +452,71 @@ try {
                     'override_periodo' => $getString($input, 'periodo') ?: null,
                     'extra1' => $getString($input, 'extra1') ?: null,
                     'extra2' => $getString($input, 'extra2') ?: null,
-                    'sistema' => 'SistemaRecordAcademico',
-                    'modulo' => 'ExpedienteAcademico',
-                    'requiere_firmado' => true,
-                    'requiere_index' => true,
+                    'tipo' => 'Nuevo',
+                    'sistema' => 'SISTEMA RECORD ACADEMICO',
+                    'modulo' => 'Record Academico',
+                    'requiere_firmado' => 'N',
+                    'requiere_index' => 'N',
                 ];
+
+                $ipOrigenRepositorio = trim((string) (
+                    $_ENV['REPOSITORIO_DOCUMENTAL_IP_ORIGEN']
+                    ?? getenv('REPOSITORIO_DOCUMENTAL_IP_ORIGEN')
+                    ?: 'desa-estable-procesamientosentencias.funcionjudicial.gob.ec'
+                ));
 
                 $pdfService = new PdfService();
                 $resultado = $pdfService->generateAndArchive(
                     cedula: $cedula,
                     accessToken: $accessToken,
-                    ipOrigen: RequestContext::getClientIp(),
+                    ipOrigen: $ipOrigenRepositorio,
                     options: $options
                 );
 
+                $uuidRepositorio = RepositorioDocumentalService::extraerUuid($resultado);
+                if ($uuidRepositorio === '') {
+                    throw new \RuntimeException(
+                        'El Repositorio Documental confirmó la carga, pero no devolvió el UUID del documento.'
+                    );
+                }
+
+                $document = new AcademicDocument(
+                    $academicRecord,
+                    $uuidRepositorio,
+                    (string) ($resultado['_nombreArchivo'] ?? ('record_academico_' . $cedula . '.pdf'))
+                );
+                $document->setCreationAudit(
+                    SecurityContext::getCurrentUserId() ?? 0,
+                    RequestContext::getClientIp(),
+                    RequestContext::getClientHostname()
+                );
+
+                $connection = $em->getConnection();
+                $connection->beginTransaction();
+                try {
+                    $em->persist($document);
+                    $em->flush();
+                    $connection->commit();
+                } catch (\Throwable $databaseError) {
+                    $connection->rollBack();
+                    throw $databaseError;
+                }
+
                 CsvService::logHistory('Archivo Documental', "PDF de cédula $cedula archivado en el Repositorio Documental.");
+
+                $respuestaRepositorio = $resultado;
+                unset($respuestaRepositorio['_nombreArchivo']);
 
                 $respond([
                     'success' => true,
                     'message' => 'PDF generado y archivado correctamente.',
-                    'repositorio' => $resultado,
+                    'documento' => [
+                        'idDocumento' => $document->getId(),
+                        'idRecordAcademico' => $academicRecord->getId(),
+                        'uuidRepositorio' => $uuidRepositorio,
+                        'nombreArchivo' => $document->getFileName(),
+                    ],
+                    'repositorio' => $respuestaRepositorio,
                 ]);
             } catch (\Throwable $e) {
                 error_log('Error archivando PDF en Repositorio Documental: ' . $e->getMessage());

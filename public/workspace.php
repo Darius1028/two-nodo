@@ -70,84 +70,62 @@ function e($v): string {
         .iframe-container { width: 100%; flex: 1; min-height: 650px; border: none; background: #edf2f7; }
         .empty-view { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; color: #94a3b8; text-align: center; padding: 40px; }
         .empty-view span { font-size: 50px; margin-bottom: 10px; }
-        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
-        .modal.active { display: flex; }
-        .modal-content { background: white; padding: 30px 25px; border-radius: 10px; max-width: 400px; width: 90%; box-shadow: 0 5px 20px rgba(0,0,0,0.25); text-align: center; }
-        .btn-secondary { background: #6c757d; color: white; }
         .btn-danger { background: #dc3545; color: white; }
     </style>
     <script>
-        function requestPdfReload() {
-            const cedula  = encodeURIComponent(document.getElementById('override_cedula').value);
-            const nombre  = encodeURIComponent(document.getElementById('override_nombre').value);
-            const email   = encodeURIComponent(document.getElementById('override_email').value);
-            const periodo = encodeURIComponent(document.getElementById('override_periodo').value);
-            const extra1  = encodeURIComponent(document.getElementById('override_extra1').value);
-            const extra2  = encodeURIComponent(document.getElementById('override_extra2').value);
-            const start   = encodeURIComponent(document.getElementById('start_year').value);
-            const end     = encodeURIComponent(document.getElementById('end_year').value);
-            const iframe = document.getElementById('pdfIframe');
-            if (iframe) {
-                iframe.src = 'PdfGenerator.php?cedula_query=' + cedula
-                    + '&start=' + start
-                    + '&end=' + end
-                    + '&name=' + nombre
-                    + '&email=' + email
-                    + '&periodo=' + periodo
-                    + '&extra1=' + extra1
-                    + '&extra2=' + extra2
-                    + '&_=' + Date.now()
-                    + '#toolbar=1';
-                iframe.style.display = 'block';
-                document.getElementById('emptyState').style.display = 'none';
-            }
-        }
-
-        function closeModal(id) { document.getElementById(id).classList.remove('active'); }
-
-        // Muestra el modal de confirmación (no usa confirm() nativo para no
-        // exponer rutas ni datos internos en el título del diálogo del OS).
-        function archivarEnRepositorio() {
-            const cedula = document.getElementById('override_cedula').value;
-            if (!cedula) {
-                alert('Ingresá una cédula primero.');
-                return;
-            }
-            document.getElementById('archivarModal').classList.add('active');
-        }
-
-        // Ejecuta el archivo una vez confirmado desde el modal.
-        async function executeArchivar() {
-            closeModal('archivarModal');
-            const boton = document.getElementById('btnArchivar');
+        async function requestPdfReload() {
+            const boton = document.getElementById('btnGenerar');
             boton.disabled = true;
-            boton.textContent = 'Archivando…';
+            boton.textContent = 'Generando y archivando…';
             try {
                 const response = await fetch('api.php?action=archive_pdf', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        cedula:     document.getElementById('override_cedula').value,
+                        cedula: document.getElementById('override_cedula').value,
                         start_year: document.getElementById('start_year').value,
-                        end_year:   document.getElementById('end_year').value,
-                        name:       document.getElementById('override_nombre').value,
-                        email:      document.getElementById('override_email').value,
-                        periodo:    document.getElementById('override_periodo').value,
-                        extra1:     document.getElementById('override_extra1').value,
-                        extra2:     document.getElementById('override_extra2').value,
+                        end_year: document.getElementById('end_year').value,
+                        name: document.getElementById('override_nombre').value,
+                        email: document.getElementById('override_email').value,
+                        periodo: document.getElementById('override_periodo').value,
+                        extra1: document.getElementById('override_extra1').value,
+                        extra2: document.getElementById('override_extra2').value,
                     }),
                 });
                 const data = await response.json();
-                if (data.success) {
-                    alert('PDF archivado correctamente en el Repositorio Documental.');
-                } else {
-                    alert('Error al archivar: ' + (data.error || 'error desconocido'));
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || 'No se pudo archivar el PDF.');
                 }
+
+                const cedula  = encodeURIComponent(document.getElementById('override_cedula').value);
+                const nombre  = encodeURIComponent(document.getElementById('override_nombre').value);
+                const email   = encodeURIComponent(document.getElementById('override_email').value);
+                const periodo = encodeURIComponent(document.getElementById('override_periodo').value);
+                const extra1  = encodeURIComponent(document.getElementById('override_extra1').value);
+                const extra2  = encodeURIComponent(document.getElementById('override_extra2').value);
+                const start   = encodeURIComponent(document.getElementById('start_year').value);
+                const end     = encodeURIComponent(document.getElementById('end_year').value);
+                const iframe = document.getElementById('pdfIframe');
+                if (iframe) {
+                    iframe.src = 'PdfGenerator.php?cedula_query=' + cedula
+                        + '&start=' + start
+                        + '&end=' + end
+                        + '&name=' + nombre
+                        + '&email=' + email
+                        + '&periodo=' + periodo
+                        + '&extra1=' + extra1
+                        + '&extra2=' + extra2
+                        + '&_=' + Date.now()
+                        + '#toolbar=1';
+                    iframe.style.display = 'block';
+                    document.getElementById('emptyState').style.display = 'none';
+                }
+                alert('PDF generado, archivado y registrado correctamente.');
             } catch (err) {
-                alert('Error de red al archivar: ' + err.message);
+                alert('Error al generar el PDF: ' + err.message);
             } finally {
                 boton.disabled = false;
-                boton.textContent = '📁 Archivar en Repositorio Documental';
+                boton.textContent = '⚡ Generar PDF';
             }
         }
     </script>
@@ -214,8 +192,7 @@ function e($v): string {
                         <label for="override_extra2">Línea Personalizada 2</label>
                         <input type="text" id="override_extra2" placeholder="Ej: Modalidad Regular">
                     </div>
-                    <button type="button" class="btn btn-success" onclick="requestPdfReload()">⚡ Generar PDF</button>
-                    <button type="button" id="btnArchivar" class="btn btn-primary" style="margin-top:8px;" onclick="archivarEnRepositorio()">📁 Archivar en Repositorio Documental</button>
+                    <button type="button" id="btnGenerar" class="btn btn-success" onclick="requestPdfReload()">⚡ Generar PDF</button>
                 </div>
             <?php endif; ?>
         </div>
@@ -236,18 +213,5 @@ function e($v): string {
     </div>
 </div>
 
-<div class="modal" id="archivarModal">
-    <div class="modal-content">
-        <h3 style="color:#003366; margin-bottom:15px;">Confirmar Archivo</h3>
-        <p style="margin-bottom:20px; color:#555;">
-            ¿Archivar y firmar este expediente en el Repositorio Documental institucional?<br><br>
-            <span style="color:#dc3545; font-weight:bold;">Esta acción genera un documento oficial.</span>
-        </p>
-        <div style="display:flex; gap:10px; justify-content:center;">
-            <button type="button" class="btn btn-secondary" onclick="closeModal('archivarModal')">Cancelar</button>
-            <button type="button" class="btn btn-primary" style="width:auto; padding:12px 24px;" onclick="executeArchivar()">Sí, Archivar</button>
-        </div>
-    </div>
-</div>
 </body>
 </html>

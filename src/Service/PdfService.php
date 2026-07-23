@@ -91,14 +91,11 @@ class InEFPDF extends FPDF
 }
 
 /**
- * Genera el PDF de expediente académico. Tiene dos usos DISTINTOS y
- * DELIBERADAMENTE SEPARADOS:
+ * Genera el PDF de expediente académico.
  *
- *  - generateRecord()     -> vista previa, se envía inline al navegador.
- *                            No toca el Repositorio Documental.
- *  - generateAndArchive() -> genera Y archiva (con firma) en el
- *                            Repositorio Documental institucional.
- *                            Requiere un access token de servicio.
+ *  - generateRecord() se conserva para renderizar la copia en el visor.
+ *  - generateAndArchive() es el flujo oficial disparado por “Generar PDF”:
+ *    genera y archiva el documento en el Repositorio Documental.
  */
 class PdfService
 {
@@ -435,7 +432,7 @@ class PdfService
         $nombreArchivo = sprintf(
             'record_academico_%s_%s.pdf',
             preg_replace('/[^0-9A-Za-z_-]/', '', $cedula),
-            date('Ymd_His')
+            date('Ymd')
         );
 
         $contenidoPdf = $this->pdf->Output('S');
@@ -451,12 +448,16 @@ class PdfService
             nombreArchivo: $nombreArchivo,
             accessToken: $accessToken,
             ipOrigen: $ipOrigen,
-            sistema: $options['sistema'] ?? 'SistemaRecordAcademico',
-            modulo: $options['modulo'] ?? 'ExpedienteAcademico',
-            requiereFirmado: $options['requiere_firmado'] ?? true,
-            requiereIndex: $options['requiere_index'] ?? true
+            tipo: $options['tipo'] ?? 'Nuevo',
+            sistema: $options['sistema'] ?? 'SISTEMA RECORD ACADEMICO',
+            modulo: $options['modulo'] ?? 'Record Academico',
+            requiereFirmado: $options['requiere_firmado'] ?? 'N',
+            requiereIndex: $options['requiere_index'] ?? 'N'
         );
 
-        return $repositorio->subirPdf($dto);
+        $response = $repositorio->subirPdf($dto);
+        $response['_nombreArchivo'] = $nombreArchivo;
+
+        return $response;
     }
 }

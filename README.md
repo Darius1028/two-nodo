@@ -11,7 +11,7 @@ Sistema web para la gestión, consulta y certificación de registros académicos
 - **Exportación CSV** — Descarga de registros por año o por cédula.
 - **Validación previa de CSV** — Endpoint `validate_csv` que reporta errores de columnas antes de importar.
 - **Generación de PDFs** — Certificados con membrete, firma y código QR verificable.
-- **Archivo en Repositorio Documental** — Integración con el servicio institucional para archivar PDFs con firma digital.
+- **Generación y archivo documental en un solo paso** — Al generar el PDF se envía al servicio institucional, se guarda su UUID y se audita la operación.
 - **Verificación pública de certificados** — Endpoint sin login para validar QR desde portales externos, con rate limiting por IP.
 - **API REST JSON** — Endpoints para búsqueda, CRUD, importación CSV, generación y archivo de PDFs.
 - **Panel administrativo** — Interfaz HTML para gestión completa con control de acceso por roles.
@@ -395,7 +395,7 @@ Todos los endpoints se acceden en `/api.php`. La autenticación se gestiona por 
 | `GET` | `?action=check_errors&year=2024` | Reporte de errores en datos | ADMIN |
 | `GET` | `?action=error_summary&year=2024` | Resumen de errores por tipo | ADMIN |
 | `GET` | `?action=get_history&limit=50` | Bitácora de operaciones | ADMIN |
-| `POST` | `?action=archive_pdf` | Generar PDF y archivarlo en Repositorio Documental | USER |
+| `POST` | `?action=archive_pdf` | Generar, archivar y registrar el PDF (incluye auditoría) | USER |
 
 **Paginación:** Los listados aceptan `limit` (1–500, default 50) y `offset`.
 
@@ -427,6 +427,9 @@ Usuario → workspace.php → (sin sesión) → Keycloak login
 ### Token de servicio (Repositorio Documental)
 
 La acción `archive_pdf` requiere un token propio de la aplicación (flujo `client_credentials`) para llamar al Repositorio Documental. Esto requiere que el cliente de Keycloak tenga **"Service Accounts Enabled"** activado.
+
+Antes de desplegar esta funcionalidad en una base que aún no tenga las tablas
+documentales, ejecutar `scripts/20260723_documento_academico.sql`.
 
 ---
 
