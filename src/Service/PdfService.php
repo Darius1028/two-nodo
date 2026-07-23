@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace App\Service;
 
 use App\Core\EntityManagerProvider;
-use App\Dto\DocumentUploadDto;
+use App\dto\DocumentUploadDto;
 use App\Entity\AcademicRecord;
 use App\Exception\SystemException;
 use FPDF;

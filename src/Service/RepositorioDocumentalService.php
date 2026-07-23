@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace App\Service;
 
-use App\Dto\DocumentUploadDto;
+use App\dto\DocumentUploadDto;
 use App\Exception\InvalidConfigurationException;
 use App\Exception\SystemException;
 use App\Exception\ValidationException;
