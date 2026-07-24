@@ -46,44 +46,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'delete_year_db':
                 $year = (int)($_POST['delete_year'] ?? 0);
                 if ($year <= 0) { $message = 'Año inválido.'; $messageType = 'error'; break; }
-                // Un año con cientos de miles de registros (como el CSV de
-                // 94MB que se importó) agotaba la memoria: findBy() sin
-                // límite hidrataba TODOS los registros de una sola vez y
-                // Doctrine los mantenía a todos trackeados en el
-                // UnitOfWork hasta el flush() final. Se batchea de a 500 y
-                // se hace clear() entre lotes para soltar esa memoria. Al
-                // no usar offset, cada vuelta trae "los primeros 500 que
-                // queden" -- los ya borrados en el lote anterior no vuelven
-                // a aparecer, así que no hace falta paginar.
-                set_time_limit(0);
-                $em = EntityManagerProvider::get();
-                $conn = $em->getConnection();
-                $batchSize = 500;
-                $count = 0;
+                $conn = EntityManagerProvider::get()->getConnection();
+                $idPersona = SecurityContext::getCurrentUserId() ?? 0;
+                $ip       = mb_substr(trim(RequestContext::getClientIp()), 0, 45);
+                $equipo   = mb_substr(trim(RequestContext::getClientHostname()), 0, 50);
+                $fecha    = (new \DateTime())->format('Y-m-d H:i:s');
                 try {
-                    $conn->beginTransaction();
-                    while (true) {
-                        $batch = $em->getRepository(AcademicRecord::class)->findBy(
-                                ['origen_tabla' => (string)$year],
-                                null,
-                                $batchSize
-                        );
-                        if (empty($batch)) {
-                            break;
-                        }
-                        foreach ($batch as $r) {
-                            $em->remove($r);
-                        }
-                        $em->flush();
-                        $em->clear();
-                        $count += count($batch);
-                    }
-                    $conn->commit();
+                    $count = $conn->executeStatement(
+                        "UPDATE [Academico].[RecordAcademico]
+                            SET estado            = 'X',
+                                idPersonaModifica = :idPersona,
+                                fechaModifica     = :fecha,
+                                ipModifica        = :ip,
+                                equipoModifica    = :equipo,
+                                motivoModifica    = 'Eliminado'
+                          WHERE origen_tabla = :year
+                            AND estado      != 'X'",
+                        [
+                            'idPersona' => $idPersona,
+                            'fecha'     => $fecha,
+                            'ip'        => $ip,
+                            'equipo'    => $equipo,
+                            'year'      => (string)$year,
+                        ]
+                    );
                     $message = "Se eliminaron $count registros del año $year.";
                     $messageType = 'success';
-                    CsvService::logHistory('Eliminación Masiva', "Se eliminaron $count registros del año $year.");
+                    CsvService::logHistory('Eliminación Masiva', "Se eliminaron $count registros del año $year (estado X).");
                 } catch (\Throwable $e) {
-                    if ($conn->isTransactionActive()) { $conn->rollBack(); }
                     $message = 'Error: ' . $e->getMessage();
                     $messageType = 'error';
                 }
@@ -191,11 +181,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $record = $em->getRepository(AcademicRecord::class)->find($id);
                 if (!$record) { $message = 'Registro no encontrado.'; $messageType = 'error'; break; }
                 $cedulaBorrada = $record->getCedula();
-                $em->remove($record);
+                $record->markAsDeleted(
+                    SecurityContext::getCurrentUserId() ?? 0,
+                    RequestContext::getClientIp(),
+                    RequestContext::getClientHostname()
+                );
                 $em->flush();
                 $message = "Registro de cédula $cedulaBorrada eliminado.";
                 $messageType = 'success';
-                CsvService::logHistory('Eliminación', "Registro #$id (cédula $cedulaBorrada) eliminado.");
+                CsvService::logHistory('Eliminación', "Registro #$id (cédula $cedulaBorrada) eliminado (estado X).");
                 break;
 
             case 'toggle_qr':
@@ -266,6 +260,7 @@ if ($searchTerm !== '' && in_array($searchColumn, $allowed, true)) {
             ->select('r')->from(AcademicRecord::class, 'r')
             ->where("r.$searchColumn LIKE :termino")
             ->setParameter('termino', '%' . $searchTerm . '%')
+            ->andWhere("r.estado != 'X'")
             ->orderBy('r.origen_tabla', 'DESC')
             ->addOrderBy('r.id', 'DESC');
     $records = array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
@@ -273,12 +268,14 @@ if ($searchTerm !== '' && in_array($searchColumn, $allowed, true)) {
 } else {
     $qb = $em->createQueryBuilder()
             ->select('r')->from(AcademicRecord::class, 'r')
+            ->where("r.estado != 'X'")
             ->orderBy('r.origen_tabla', 'DESC')
             ->addOrderBy('r.id', 'DESC')
             ->setMaxResults($perPage)
             ->setFirstResult($offset);
     $records = array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
-    $countQb = $em->createQueryBuilder()->select('COUNT(r.id)')->from(AcademicRecord::class, 'r');
+    $countQb = $em->createQueryBuilder()->select('COUNT(r.id)')->from(AcademicRecord::class, 'r')
+            ->where("r.estado != 'X'");
     $totalRecords = (int)$countQb->getQuery()->getSingleScalarResult();
 }
 $totalPages = $totalRecords > 0 ? (int)ceil($totalRecords / $perPage) : 1;

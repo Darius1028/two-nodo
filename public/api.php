@@ -112,6 +112,7 @@ try {
             $qb = $em->createQueryBuilder()
                 ->select('r')->from(AcademicRecord::class, 'r')
                 ->where(QUERY_CEDULA)->setParameter('cedula', $cedula)
+                ->andWhere("r.estado != 'X'")
                 ->orderBy('r.origen_tabla', 'DESC');
             $records = array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
             $respond(['success' => true, 'cedula' => $cedula, 'count' => count($records), 'records' => $records]);
@@ -125,7 +126,7 @@ try {
             }
             $em = EntityManagerProvider::get();
             $record = $em->getRepository(AcademicRecord::class)->find($id);
-            if ($record === null) {
+            if ($record === null || $record->getEstado() === 'X') {
                 $respond(['success' => false, 'error' => MSG_NOT_FOUND], 404);
             }
             $respond(['success' => true, 'record' => $record->toArray()]);
@@ -141,13 +142,15 @@ try {
             $qb = $em->createQueryBuilder()
                 ->select('r')->from(AcademicRecord::class, 'r')
                 ->where('r.origen_tabla = :year')->setParameter('year', (string)$year)
+                ->andWhere("r.estado != 'X'")
                 ->orderBy('r.id', 'DESC')
                 ->setMaxResults($limit)->setFirstResult($offset);
             $records = array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
 
             $countQb = $em->createQueryBuilder()
                 ->select('COUNT(r.id)')->from(AcademicRecord::class, 'r')
-                ->where('r.origen_tabla = :year')->setParameter('year', (string)$year);
+                ->where('r.origen_tabla = :year')->setParameter('year', (string)$year)
+                ->andWhere("r.estado != 'X'");
             $total = (int)$countQb->getQuery()->getSingleScalarResult();
 
             $respond([
@@ -238,9 +241,13 @@ try {
             if ($record === null) {
                 $respond(['success' => false, 'error' => MSG_NOT_FOUND], 404);
             }
-            $em->remove($record);
+            $record->markAsDeleted(
+                SecurityContext::getCurrentUserId() ?? 0,
+                RequestContext::getClientIp(),
+                RequestContext::getClientHostname()
+            );
             $em->flush();
-            CsvService::logHistory('Eliminación', "Registro #$id eliminado.");
+            CsvService::logHistory('Eliminación', "Registro #$id eliminado (estado X).");
             $respond(['success' => true]);
             break;
 
@@ -342,6 +349,7 @@ try {
             $count = (int)$em->createQueryBuilder()
                 ->select('COUNT(r.id)')->from(AcademicRecord::class, 'r')
                 ->where(QUERY_CEDULA)->setParameter('cedula', $cedula)
+                ->andWhere("r.estado != 'X'")
                 ->getQuery()->getSingleScalarResult();
             if ($count === 0) {
                 $respond(['success' => false, 'error' => 'No records found for this cedula'], 404);
@@ -373,6 +381,7 @@ try {
                 ->select('r.nombre', 'r.materia', 'r.origen_tabla')
                 ->from(AcademicRecord::class, 'r')
                 ->where(QUERY_CEDULA)->setParameter('cedula', $cedula)
+                ->andWhere("r.estado != 'X'")
                 ->orderBy('r.origen_tabla', 'DESC')
                 ->getQuery()->getArrayResult();
 
@@ -432,6 +441,7 @@ try {
                     ->from(AcademicRecord::class, 'r')
                     ->where('r.cedula = :cedula')
                     ->setParameter('cedula', $cedula)
+                    ->andWhere("r.estado != 'X'")
                     ->andWhere('r.origen_tabla >= :startYear')
                     ->setParameter('startYear', (string) $startYear)
                     ->andWhere('r.origen_tabla <= :endYear')

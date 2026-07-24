@@ -124,6 +124,7 @@ class ErrorFinder
         $qb = $em->createQueryBuilder()
             ->select('DISTINCT r.origen_tabla')
             ->from(AcademicRecord::class, 'r')
+            ->where("r.estado != 'X'")
             ->orderBy('r.origen_tabla', 'DESC');
         $result = $qb->getQuery()->getScalarResult();
         return array_column($result, 'origen_tabla');

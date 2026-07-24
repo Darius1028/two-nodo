@@ -276,13 +276,23 @@ class AcademicRecord
     {
         $estado = strtoupper(trim($estado));
 
-        if (!in_array($estado, ['A', 'I'], true)) {
+        if (!in_array($estado, ['A', 'I', 'X'], true)) {
             throw new \InvalidArgumentException(
-                'El estado debe ser A o I.'
+                'El estado debe ser A, I o X.'
             );
         }
 
         $this->estado = $estado;
+    }
+
+    public function markAsDeleted(int $idPersona, string $ip, string $equipo): void
+    {
+        $this->estado = 'X';
+        $this->idPersonaModifica = $idPersona;
+        $this->fechaModifica = new \DateTime();
+        $this->ipModifica = mb_substr(trim($ip), 0, 45);
+        $this->equipoModifica = mb_substr(trim($equipo), 0, 50);
+        $this->motivoModifica = 'Eliminado';
     }
 
     public function fill(array $data): void

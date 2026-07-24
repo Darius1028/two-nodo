@@ -401,6 +401,7 @@ class CsvService
             } else {
                 $qb->where('r.origen_tabla = :year')->setParameter('year', (string)$year);
             }
+            $qb->andWhere("r.estado != 'X'");
 
             $records = array_map(
                 static fn(AcademicRecord $r) => $r->toArray(),

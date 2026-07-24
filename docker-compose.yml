@@ -20,21 +20,19 @@ services:
       dockerfile: docker/Dockerfile
     container_name: academic_php
     command: >-
-      sh -c "mkdir -p /var/www/html/var/cache /var/www/html/var/log
-      && chown -R www-data:www-data /var/www/html/var
-      && chmod -R ug+rwX /var/www/html/var
-      && exec php-fpm"
+      sh -c "mkdir -p /var/www/html/var/cache /var/www/html/var/log && 
+      chown -R www-data:www-data /var/www/html/var && 
+      chmod -R ug+rwX /var/www/html/var && 
+      chown -R www-data:www-data /var/www/html/config && 
+      chmod -R ug+rwX /var/www/html/config && 
+      exec php-fpm"
     volumes:
       # Código fuente
       - .:/var/www/html
-
       # Vendor (este SÍ puede ser volumen de Docker, no se pierde)
       - vendor_data:/var/www/html/vendor
-
-      # ✅ CAMBIO IMPORTANTE: Bind mount local para var (logs y cache)
-      # Así historial.json queda en tu disco C: y nunca se borrará.
+      # Bind mount local para var (logs y cache)
       - ./var:/var/www/html/var
-
     env_file:
       - .env
     extra_hosts:

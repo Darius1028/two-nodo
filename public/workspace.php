@@ -28,6 +28,7 @@ if ($searchCedula !== '') {
     $qb = $em->createQueryBuilder()
             ->select('r')->from(AcademicRecord::class, 'r')
             ->where('r.cedula = :cedula')->setParameter('cedula', $searchCedula)
+            ->andWhere("r.estado != 'X'")
             ->orderBy('r.origen_tabla', 'DESC')
             ->addOrderBy('r.id', 'DESC');
     $allRecords = array_map(
