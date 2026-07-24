@@ -5,6 +5,7 @@ namespace App\Service;
 
 use App\Entity\AcademicDocument;
 use App\Entity\AcademicDocumentAudit;
+use App\Exception\ValidationException;
 use Doctrine\DBAL\Connection;
 
 final class AcademicDocumentAuditService
@@ -24,7 +25,7 @@ final class AcademicDocumentAuditService
             [(string) round(microtime(true) * 1000)]
         );
         if ($revisionId === false) {
-            throw new \RuntimeException('No se pudo generar la revisión de auditoría.');
+            throw new ValidationException('No se pudo generar la revisión de auditoría.');
         }
 
         $connection->insert(
