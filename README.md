@@ -2,15 +2,19 @@
 
 Sistema web para la gestión, consulta y certificación de registros académicos institucionales. Permite importar, administrar y exportar registros de estudiantes, generar PDFs certificados con QR de verificación, y expone una API REST completa. La autenticación se delega a Keycloak mediante OpenID Connect; la **autorización por roles se resuelve desde una base de datos institucional externa** (independiente de Keycloak).
 
+> **Estado del proyecto:** activo. Última sesión de cambios: soft-delete de registros, visor PDF con PDF.js, caché local de QR, descarga directa de PDFs y mejoras al script de reinicio.
+
 ---
 
 ## Características principales
 
-- **Gestión de registros** — CRUD completo de registros académicos por cédula, materia, período y año.
+- **Gestión de registros** — CRUD completo de registros académicos por cédula, materia, período y año. La eliminación es **soft delete**: los registros pasan a `estado = 'X'` y son invisibles en consultas, pero permanecen en la base para auditoría.
 - **Importación CSV en streaming** — Carga masiva sin cargar el archivo en RAM; detecta separador y encoding automáticamente. Soporta archivos de hasta 128 MB sin crashear el servidor.
-- **Exportación CSV** — Descarga de registros por año o por cédula.
+- **Exportación CSV** — Descarga de registros por año o por cédula (excluye registros con `estado = 'X'`).
 - **Validación previa de CSV** — Endpoint `validate_csv` que reporta errores de columnas antes de importar.
-- **Generación de PDFs** — Certificados con membrete, firma y código QR verificable.
+- **Generación de PDFs** — Certificados con membrete, firma y código QR verificable. Al pulsar "Generar PDF" el archivo se descarga automáticamente y se archiva en el Repositorio Documental en un solo paso.
+- **Visor de PDF integrado** — Renderizado en `<canvas>` con PDF.js (alojado localmente, sin CDN); evita que el visor nativo del navegador exponga botones de descarga o envío a Google Drive.
+- **QR de verificación con caché local** — La imagen QR se genera una vez por cédula y se almacena en `var/cache/qr/` (TTL 30 días). Peticiones posteriores no hacen llamadas de red al servidor de QR externo.
 - **Generación y archivo documental en un solo paso** — Al generar el PDF se envía al servicio institucional, se guarda su UUID y se audita la operación.
 - **Verificación pública de certificados** — Endpoint sin login para validar QR desde portales externos, con rate limiting por IP.
 - **API REST JSON** — Endpoints para búsqueda, CRUD, importación CSV, generación y archivo de PDFs.
@@ -35,6 +39,7 @@ Sistema web para la gestión, consulta y certificación de registros académicos
 | Base de datos de roles | Microsoft SQL Server (`PORTAL_APLICATIVOS_CJ`) |
 | Autenticación | Keycloak (OpenID Connect) |
 | Generación PDF | FPDF |
+| Visor PDF | PDF.js (alojado localmente) |
 | Servidor web | Nginx |
 | Runtime | PHP-FPM |
 | Contenedores | Docker / Docker Compose |
@@ -110,48 +115,6 @@ sistema-records/
 └── var/                       # Cache y logs (generado en instalación)
     ├── cache/
     └── log/
-```
-
----
-
-## Esquema de base de datos
-
-El script `database/create_schema.sql` crea todos los schemas y tablas. Es **idempotente** (puede ejecutarse más de una vez sin errores).
-
-```
-AUD.REVINFO                          Schema AUD  — tabla de metadatos de revisión
-  REV       INT IDENTITY PK
-  REVTSTMP  BIGINT
-
-Academico.RecordAcademico            Schema Academico  — registros académicos
-  id        INT IDENTITY PK
-  cedula, nombre, email, materia, nota, total, periodo, anio, origen_tabla,
-  proceso, grupo_objetivo, modalidad, fecha_inicio, fecha_fin, aprueba,
-  estado, idPersonaCrea, fechaCrea, ipCrea(45), equipoCrea,
-  idPersonaModifica, fechaModifica, ipModifica(45), equipoModifica, motivoModifica
-  Índices: cedula, origen_tabla, materia, anio
-  Nota: ipCrea/ipModifica son VARCHAR(45) para soportar IPv6
-
-AcademicoAUD.RecordAcademico_AUD    Schema AcademicoAUD  — auditoría (snapshot por revisión)
-  id + REV  PK compuesta
-  REVTYPE   SMALLINT (0=INSERT, 1=UPDATE, 2=DELETE)
-  ...mismos campos que RecordAcademico (todos NULL)...
-  FK: REV → AUD.REVINFO.REV
-  Sin FK hacia RecordAcademico: los registros AUD sobreviven al borrado del principal
-```
-
-Para ejecutar el script:
-
-```sql
--- En SQL Server Management Studio o sqlcmd:
--- Ajustar el nombre de la BD en la primera línea si es diferente a record_academico_db
-```
-
-```bash
-# Desde el contenedor PHP:
-docker-compose exec php-app /opt/mssql-tools/bin/sqlcmd \
-  -S $DB_HOST -U $DB_USER -P $DB_PASS -d $DB_NAME \
-  -i database/create_schema.sql
 ```
 
 ---
@@ -240,8 +203,8 @@ El archivo `config/config.json` controla opciones específicas de la aplicación
 {
   "qr_enabled": true,
   "qr_base_url": "https://tu-dominio.com/verificar-record/",
-  "letterhead_image": "assets/letterhead.png",
-  "signature_image": "assets/signature.png",
+  "letterhead_image": "pdfjs/letterhead.png",
+  "signature_image": "pdfjs/signature.png",
   "column_schema": [ ... ]
 }
 ```
@@ -333,7 +296,8 @@ El sistema implementa auditoría automática equivalente al patrón `@Audited` d
 |---|---|---|
 | INSERT individual | `postPersist` → `AcademicRecordAuditService` | escribe REVTYPE=0 |
 | UPDATE individual | `postUpdate` → `AcademicRecordAuditService` | escribe REVTYPE=1 |
-| DELETE individual | `preRemove` → `AcademicRecordAuditService` | escribe REVTYPE=2 antes del DELETE |
+| Eliminación individual | `markAsDeleted()` → `flush()` → `postUpdate` | escribe REVTYPE=1 con `estado='X'` |
+| Eliminación masiva por año | `UPDATE` SQL nativo directo | no pasa por ORM; queda en `logHistory` |
 | Import CSV masivo | `CsvService::bulkInsertAudit` | escribe REVTYPE=0 en batch |
 
 ### Campos de trazabilidad del operador
@@ -388,7 +352,7 @@ Todos los endpoints se acceden en `/api.php`. La autenticación se gestiona por 
 | `GET` | `?action=get_config` | Configuración pública del sistema | — |
 | `POST` | `?action=insert_record` | Crear un registro | ADMIN |
 | `PUT` | `?action=update_record` | Actualizar un registro | ADMIN |
-| `DELETE` | `?action=delete_record&id=1` | Eliminar un registro | ADMIN |
+| `DELETE` | `?action=delete_record&id=1` | Soft-delete de un registro (`estado='X'`) | ADMIN |
 | `POST` | `?action=import_csv` | Importar registros desde CSV | ADMIN |
 | `POST` | `?action=validate_csv` | Validar CSV sin importar | ADMIN |
 | `GET` | `?action=export_csv&year=2024` | Exportar registros a CSV | ADMIN |
@@ -472,7 +436,9 @@ docker-compose down -v
 - `ErrorHandler` impide que stack traces o rutas internas lleguen al usuario final en producción.
 - Rate limiting por IP en endpoints públicos (sin Redis: archivo con file locking).
 - Página de error 403 personalizada (`public/403.html`) con redirección al sistema; no expone rutas internas.
-- Los diálogos de confirmación usan modales propios (no `window.confirm()` nativo), evitando que el título del diálogo del SO exponga rutas o URLs internas del servidor.
+- Los diálogos de confirmación usan modales propios y las notificaciones usan toasts en página (no `window.alert()` / `window.confirm()` nativos), evitando que el diálogo del SO exponga la IP o URL interna del servidor.
+- El visor de PDF usa PDF.js sobre `<canvas>` (sin iframe con visor nativo), eliminando los botones de descarga y "Guardar en Google Drive" del navegador. La descarga se controla exclusivamente desde el botón "Generar PDF".
+- La eliminación de registros es **soft delete** (`estado = 'X'`): los datos nunca se borran físicamente, garantizando trazabilidad completa.
 - Jerarquía de excepciones (`AppException` → `ValidationException`, `SystemException`, `NotFoundException`, `InvalidConfigurationException`) para distinguir errores de validación de errores de sistema sin exponer detalles técnicos al usuario.
 - La variable `APP_DEBUG=false` es obligatoria en producción.
 - En producción, configurar `DB_ENCRYPT=true` y `TrustServerCertificate=false` en la conexión SQL Server.

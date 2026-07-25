@@ -83,8 +83,8 @@ RUN --mount=type=cache,target=/tmp/composer-cache \
         --no-progress \
         --optimize-autoloader
 
-RUN mkdir -p var/cache var/log public/assets \
-    && chown -R www-data:www-data var public/assets
+RUN mkdir -p var/cache var/log public/pdfjs \
+    && chown -R www-data:www-data var public/pdfjs
 
 EXPOSE 9000
 

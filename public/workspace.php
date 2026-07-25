@@ -54,6 +54,10 @@ function e($v): string {
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; color: #333; line-height: 1.6; min-height: 100vh; padding: 20px; }
+        #toast { position: fixed; top: 24px; left: 50%; transform: translateX(-50%); padding: 14px 28px; border-radius: 8px; font-size: 14px; font-weight: 600; color: #fff; z-index: 9999; opacity: 0; transition: opacity 0.3s; pointer-events: none; max-width: 90vw; text-align: center; }
+        #toast.show { opacity: 1; }
+        #toast.success { background: #28a745; }
+        #toast.error   { background: #dc3545; }
         .container { max-width: 1400px; margin: 0 auto; }
         .workspace-layout { display: grid; grid-template-columns: 420px 1fr; gap: 20px; margin-top: 20px; }
         @media(max-width: 1024px) { .workspace-layout { grid-template-columns: 1fr; } }
@@ -68,12 +72,121 @@ function e($v): string {
         .btn-primary { background: #003366; color: white; }
         .btn-success { background: #28a745; color: white; margin-top: 10px; }
         .results-viewport { background: white; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); display: flex; flex-direction: column; min-height: 600px; overflow: hidden; }
-        .iframe-container { width: 100%; flex: 1; min-height: 650px; border: none; background: #edf2f7; }
         .empty-view { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; color: #94a3b8; text-align: center; padding: 40px; }
         .empty-view span { font-size: 50px; margin-bottom: 10px; }
         .btn-danger { background: #dc3545; color: white; }
+
+        /* Visor propio con PDF.js sobre <canvas>: sin barra de herramientas del navegador */
+        .pdf-canvas-container {
+            width: 100%; flex: 1; min-height: 650px; overflow: auto;
+            background: #edf2f7; padding: 16px;
+            display: flex; flex-direction: column; align-items: center; gap: 16px;
+            -webkit-user-select: none; user-select: none;
+        }
+        .pdf-canvas-container canvas {
+            max-width: 100%; height: auto;
+            box-shadow: 0 1px 6px rgba(0,0,0,.15); background: #fff;
+        }
+        .pdf-loading { color: #64748b; font-size: 14px; padding: 20px; }
     </style>
+    <!-- PDF.js alojado localmente en el proyecto (build legacy) -->
+    <script src="assets/pdfjs/pdf.min.js"></script>
     <script>
+        // El worker también se sirve desde el proyecto (intranet, sin CDN)
+        if (window.pdfjsLib) {
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'assets/pdfjs/pdf.worker.min.js';
+        }
+    </script>
+    <script>
+        // Renderiza el PDF en <canvas> con PDF.js. Acepta una URL (string)
+        // o un origen ya cargado en memoria: { data: Uint8Array }.
+        // Al no usar el visor nativo, no hay barra ni botones Guardar/Imprimir.
+        let _pdfRenderToken = 0;
+        async function renderPdf(source) {
+            const container = document.getElementById('pdfViewer');
+            const empty = document.getElementById('emptyState');
+            if (!container) return false;
+
+            const token = ++_pdfRenderToken; // evita render solapados si se genera varias veces
+            container.innerHTML = '<div class="pdf-loading">Cargando expediente…</div>';
+            container.style.display = 'block';
+            if (empty) empty.style.display = 'none';
+
+            try {
+                if (!window.pdfjsLib) throw new Error('PDF.js no cargó.');
+                // Si es URL, se pide con la cookie de sesión de Keycloak
+                const params = (typeof source === 'string')
+                    ? { url: source, withCredentials: true }
+                    : source;
+                const pdf = await pdfjsLib.getDocument(params).promise;
+                if (token !== _pdfRenderToken) return false;
+
+                container.innerHTML = '';
+                const scale = 1.5;
+                const dpr = window.devicePixelRatio || 1;
+
+                for (let n = 1; n <= pdf.numPages; n++) {
+                    const page = await pdf.getPage(n);
+                    if (token !== _pdfRenderToken) return false;
+
+                    const viewport = page.getViewport({ scale });
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+                    canvas.width  = Math.floor(viewport.width  * dpr);
+                    canvas.height = Math.floor(viewport.height * dpr);
+                    canvas.style.width  = viewport.width  + 'px';
+                    canvas.style.height = viewport.height + 'px';
+                    container.appendChild(canvas);
+
+                    await page.render({
+                        canvasContext: ctx,
+                        viewport,
+                        transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null
+                    }).promise;
+                }
+                return true;
+            } catch (err) {
+                if (token !== _pdfRenderToken) return false;
+                container.innerHTML = '<div class="pdf-loading">No se pudo mostrar el expediente.</div>';
+                showToast('No se pudo mostrar el PDF.', 'error');
+                return false;
+            }
+        }
+
+        // Descarga el PDF y lo muestra en el visor con UNA sola generación en el servidor.
+        async function generarYDescargar(pdfBase, nombreArchivo) {
+            const resp = await fetch(pdfBase, { credentials: 'same-origin' });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const tipo = resp.headers.get('Content-Type') || '';
+            if (!tipo.includes('application/pdf')) {
+                // Si no es PDF, probablemente sea un error/redirección de sesión
+                throw new Error('Respuesta no es PDF (' + tipo + ')');
+            }
+            const blob = await resp.blob();
+
+            // 1) Descarga
+            const dlUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = dlUrl;
+            a.download = nombreArchivo;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(dlUrl), 1500);
+
+            // 2) Visor (copia propia de los bytes; PDF.js puede transferir el buffer)
+            const data = new Uint8Array(await blob.arrayBuffer());
+            return await renderPdf({ data });
+        }
+
+        function showToast(msg, type = 'success') {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.className = 'show ' + type;
+            clearTimeout(t._timer);
+            t._timer = setTimeout(() => { t.className = ''; }, 4000);
+        }
+
         async function requestPdfReload() {
             const boton = document.getElementById('btnGenerar');
             boton.disabled = true;
@@ -97,7 +210,6 @@ function e($v): string {
                 if (!response.ok || !data.success) {
                     throw new Error(data.error || 'No se pudo archivar el PDF.');
                 }
-
                 const cedula  = encodeURIComponent(document.getElementById('override_cedula').value);
                 const nombre  = encodeURIComponent(document.getElementById('override_nombre').value);
                 const email   = encodeURIComponent(document.getElementById('override_email').value);
@@ -106,24 +218,25 @@ function e($v): string {
                 const extra2  = encodeURIComponent(document.getElementById('override_extra2').value);
                 const start   = encodeURIComponent(document.getElementById('start_year').value);
                 const end     = encodeURIComponent(document.getElementById('end_year').value);
-                const iframe = document.getElementById('pdfIframe');
-                if (iframe) {
-                    iframe.src = 'PdfGenerator.php?cedula_query=' + cedula
-                        + '&start=' + start
-                        + '&end=' + end
-                        + '&name=' + nombre
-                        + '&email=' + email
-                        + '&periodo=' + periodo
-                        + '&extra1=' + extra1
-                        + '&extra2=' + extra2
-                        + '&_=' + Date.now()
-                        + '#toolbar=1';
-                    iframe.style.display = 'block';
-                    document.getElementById('emptyState').style.display = 'none';
+                const pdfBase = 'PdfGenerator.php?cedula_query=' + cedula
+                    + '&start=' + start + '&end=' + end
+                    + '&name=' + nombre + '&email=' + email
+                    + '&periodo=' + periodo
+                    + '&extra1=' + extra1 + '&extra2=' + extra2
+                    + '&_=' + Date.now();
+
+                // Nombre de archivo para la descarga (cédula sin caracteres raros)
+                const cedulaRaw = document.getElementById('override_cedula').value.replace(/[^0-9A-Za-z_-]/g, '');
+                const fecha = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+                const nombreArchivo = 'expediente_' + (cedulaRaw || 'academico') + '_' + fecha + '.pdf';
+
+                // Descarga el documento Y lo muestra en el visor (una sola generación)
+                const ok = await generarYDescargar(pdfBase, nombreArchivo);
+                if (ok) {
+                    showToast('PDF generado, archivado y descargado.', 'success');
                 }
-                alert('PDF generado, archivado y registrado correctamente.');
             } catch (err) {
-                alert('Error al generar el PDF: ' + err.message);
+                showToast('No se pudo generar el PDF. Intente nuevamente.', 'error');
             } finally {
                 boton.disabled = false;
                 boton.textContent = '⚡ Generar PDF';
@@ -132,6 +245,7 @@ function e($v): string {
     </script>
 </head>
 <body>
+<div id="toast"></div>
 <div class="container">
     <?php require_once __DIR__ . '/../templates/includes/header.php'; ?>
 
@@ -203,16 +317,37 @@ function e($v): string {
                 <h3>Visor de Expedientes Académicos</h3>
                 <p>Ingrese una cédula válida y presione generar PDF.</p>
             </div>
-            <?php if (!empty($searchCedula) && !empty($records)): ?>
-                <iframe class="iframe-container" id="pdfIframe"
-                        src="PdfGenerator.php?cedula_query=<?= urlencode($searchCedula) ?>&start=<?= e($startYear) ?>&end=<?= e($endYear) ?>#toolbar=1"
-                        title="Visor PDF"></iframe>
-            <?php else: ?>
-                <iframe class="iframe-container" id="pdfIframe" style="display:none;" title="Visor PDF"></iframe>
-            <?php endif; ?>
+            <div class="pdf-canvas-container" id="pdfViewer"
+                    <?= (!empty($searchCedula) && !empty($records)) ? '' : 'style="display:none;"' ?>></div>
         </div>
     </div>
 </div>
+
+<script>
+    // Render automático cuando la página ya carga con un expediente encontrado
+    <?php if (!empty($searchCedula) && !empty($records)): ?>
+    window.addEventListener('DOMContentLoaded', function () {
+        renderPdf('PdfGenerator.php?cedula_query=<?= urlencode($searchCedula) ?>&start=<?= (int)$startYear ?>&end=<?= (int)$endYear ?>');
+    });
+    <?php endif; ?>
+
+    // Disuasivos cosméticos (NO son protección real; ver nota abajo).
+    // Bloquea menú contextual sobre el visor e intercepta Ctrl+S / Ctrl+P.
+    (function () {
+        const viewer = document.getElementById('pdfViewer');
+        if (viewer) {
+            viewer.addEventListener('contextmenu', e => e.preventDefault());
+            viewer.addEventListener('dragstart', e => e.preventDefault());
+        }
+        document.addEventListener('keydown', function (e) {
+            const k = (e.key || '').toLowerCase();
+            if ((e.ctrlKey || e.metaKey) && (k === 's' || k === 'p')) {
+                e.preventDefault();
+                showToast('Acción deshabilitada.', 'error');
+            }
+        });
+    })();
+</script>
 
 </body>
 </html>

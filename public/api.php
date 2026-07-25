@@ -358,7 +358,7 @@ try {
                 'success' => true,
                 'cedula' => $cedula,
                 'record_count' => $count,
-                'pdf_url' => 'PdfGenerator.php?cedula_query=' . urlencode($cedula),
+                'pdf_url' => 'PdfGenerator.php?cedula_query=' . urlencode($cedula) . '#toolbar=0&navpanes=0',
             ]);
 
         // Endpoint PÚBLICO a propósito -- lo consume el validador de QR de

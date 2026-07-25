@@ -29,8 +29,8 @@ trap show_logs_on_error ERR
 
 mostrar_ayuda() {
     echo "Uso:"
-    echo "  $0 normal    Reinicia conservando imágenes y volúmenes."
-    echo "  $0 clean     Elimina contenedores, imágenes y volúmenes."
+    echo "  $0 normal    Reconstruye php-app y reinicomocia conservando volúmenes."
+    echo "  $0 clean     Elimina contenedores, imágenes y volúmenes, y reconstruye todo."
     echo
     echo "También puedes ejecutar:"
     echo "  $0"
@@ -72,21 +72,32 @@ reinicio_normal() {
     echo " Directorio: $PROJECT_DIR"
     echo "=============================================="
 
+    if [[ composer.json -nt composer.lock ]]; then
+        echo "composer.json es más nuevo que composer.lock; sincronizando lock..."
+        docker run --rm -v "$PROJECT_DIR:/app" -w /app composer:2 \
+            update --lock --no-interaction --no-scripts --ignore-platform-reqs
+    fi
+
     echo
-    echo "[1/3] Levantando o recreando servicios..."
+    echo "[1/4] Reconstruyendo imagen php-app..."
+
+    "${COMPOSE[@]}" build php-app
+
+    echo
+    echo "[2/4] Levantando o recreando servicios..."
 
     "${COMPOSE[@]}" up -d \
         --force-recreate \
         --remove-orphans
 
     echo
-    echo "[2/3] Verificando contenedores..."
+    echo "[3/4] Verificando contenedores..."
 
     sleep 3
     "${COMPOSE[@]}" ps
 
     echo
-    echo "[3/3] Mostrando últimos logs..."
+    echo "[4/4] Mostrando últimos logs..."
 
     "${COMPOSE[@]}" logs --tail=30
 
@@ -103,6 +114,12 @@ limpieza_completa() {
     echo " Proyecto: sistema-record-academico"
     echo " Directorio: $PROJECT_DIR"
     echo "=============================================="
+
+    if [[ composer.json -nt composer.lock ]]; then
+        echo "composer.json es más nuevo que composer.lock; sincronizando lock..."
+        docker run --rm -v "$PROJECT_DIR:/app" -w /app composer:2 \
+            update --lock --no-interaction --no-scripts --ignore-platform-reqs
+    fi
 
     echo
     echo "[1/5] Eliminando contenedores, imágenes y volúmenes..."

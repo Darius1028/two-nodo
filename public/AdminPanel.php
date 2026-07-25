@@ -38,7 +38,7 @@ $config = ConfigService::get();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verifyCsrf($_POST['csrf_token'] ?? null)) {
-        $message = 'Token CSRF inválido.';
+        $message = 'La sesión ha caducado. Por favor recarga la página e intenta de nuevo.';
         $messageType = 'error';
     } else {
         $action = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
@@ -211,7 +211,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $targetFile = $targetDir . ($assetType === 'letterhead' ? 'letterhead.png' : 'signature.png');
                 if (move_uploaded_file($_FILES['asset_file']['tmp_name'], $targetFile)) {
                     $cfg = ConfigService::get();
-                    $cfg[$assetType . '_image'] = 'assets/' . basename($targetFile);
+                    $cfg[$assetType . '_image'] = 'pdfjs/' . basename($targetFile);
                     ConfigService::set($cfg);
                     $message = 'Imagen cargada.';
                     $messageType = 'success';

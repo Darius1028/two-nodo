@@ -270,19 +270,34 @@ class PdfService
     private function addQRCode(string $cedula): void
     {
         $verifyUrl = $this->getVerificationUrl($cedula);
-        $qrPath = sys_get_temp_dir() . '/qr_' . $cedula . '.png';
-        $url = 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' . urlencode($verifyUrl);
-        $context = stream_context_create(['http' => ['timeout' => 5]]);
-        $imageData = @file_get_contents($url, false, $context);
-        if ($imageData !== false) {
-            file_put_contents($qrPath, $imageData);
+        $qrPath = sys_get_temp_dir() . '/qr_' . $cedula . '_' . uniqid() . '.png';
+
+        $cacheDir  = dirname(__DIR__, 2) . '/var/cache/qr';
+        $cacheFile = $cacheDir . '/qr_' . preg_replace('/[^0-9A-Za-z]/', '', $cedula) . '.png';
+        $ttl       = 86400 * 30; // 30 días
+
+        if (!file_exists($cacheFile) || (time() - filemtime($cacheFile)) > $ttl) {
+            if (!is_dir($cacheDir)) {
+                mkdir($cacheDir, 0775, true);
+            }
+            $url     = 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' . urlencode($verifyUrl);
+            $context = stream_context_create(['http' => ['timeout' => 8]]);
+
+            $imageData = false;
+            for ($attempt = 1; $attempt <= 3 && $imageData === false; $attempt++) {
+                $imageData = @file_get_contents($url, false, $context);
+            }
+
+            if ($imageData !== false) {
+                file_put_contents($cacheFile, $imageData);
+            }
         }
-        if (file_exists($qrPath)) {
+
+        if (file_exists($cacheFile)) {
             $currentY = $this->pdf->GetY();
-            $qrSize = 28;
-            $x = $this->pdf->GetPageWidth() - $qrSize - 15;
-            $this->pdf->Image($qrPath, $x, 80, $qrSize, $qrSize);
-            unlink($qrPath);
+            $qrSize   = 28;
+            $x        = $this->pdf->GetPageWidth() - $qrSize - 15;
+            $this->pdf->Image($cacheFile, $x, 80, $qrSize, $qrSize);
             $this->pdf->SetY($currentY);
         }
     }

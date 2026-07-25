@@ -48,6 +48,10 @@ $options = [
 
 try {
     header('Content-Type: application/pdf');
+    //if (!empty($_GET['download'])) {
+    //    $filename = 'record_academico_' . preg_replace('/[^0-9A-Za-z_-]/', '', $cedula) . '_' . date('Ymd') . '.pdf';
+    //    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    //}
     $pdfService = new PdfService();
     $pdfService->generateRecord($cedula, $options);
 } catch (Throwable $e) {
