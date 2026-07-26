@@ -29,14 +29,14 @@ if ($searchCedula !== '') {
             ->select('r')->from(AcademicRecord::class, 'r')
             ->where('r.cedula = :cedula')->setParameter('cedula', $searchCedula)
             ->andWhere("r.estado != 'X'")
-            ->orderBy('r.origen_tabla', 'DESC')
+            ->orderBy('r.anio', 'DESC')
             ->addOrderBy('r.id', 'DESC');
     $allRecords = array_map(
             static fn(AcademicRecord $r) => $r->toArray(),
             $qb->getQuery()->getResult()
     );
     $records = array_filter($allRecords, static function ($r) use ($startYear, $endYear) {
-        $rYear = (int)($r['origen_tabla'] ?? 0);
+        $rYear = (int)($r['anio'] ?? 0);
         return $rYear >= $startYear && $rYear <= $endYear;
     });
 }
@@ -89,92 +89,83 @@ function e($v): string {
         }
         .pdf-loading { color: #64748b; font-size: 14px; padding: 20px; }
     </style>
-    <!-- PDF.js alojado localmente en el proyecto (build legacy) -->
+    <!-- PDF.js alojado localmente (build legacy, sin CDN) -->
     <script src="assets/pdfjs/pdf.min.js"></script>
     <script>
-        // El worker también se sirve desde el proyecto (intranet, sin CDN)
         if (window.pdfjsLib) {
             pdfjsLib.GlobalWorkerOptions.workerSrc = 'assets/pdfjs/pdf.worker.min.js';
         }
     </script>
     <script>
-        // Renderiza el PDF en <canvas> con PDF.js. Acepta una URL (string)
-        // o un origen ya cargado en memoria: { data: Uint8Array }.
-        // Al no usar el visor nativo, no hay barra ni botones Guardar/Imprimir.
-        let _pdfRenderToken = 0;
+        // ---------- Visor PDF sobre <canvas> (PDF.js) ----------
+        // Sin iframe → sin barra nativa del navegador → sin botones Guardar/Imprimir.
+        let _pdfToken = 0;
+
         async function renderPdf(source) {
             const container = document.getElementById('pdfViewer');
-            const empty = document.getElementById('emptyState');
+            const empty     = document.getElementById('emptyState');
             if (!container) return false;
 
-            const token = ++_pdfRenderToken; // evita render solapados si se genera varias veces
+            const token = ++_pdfToken;
             container.innerHTML = '<div class="pdf-loading">Cargando expediente…</div>';
-            container.style.display = 'block';
+            container.style.display = 'flex';
             if (empty) empty.style.display = 'none';
 
             try {
                 if (!window.pdfjsLib) throw new Error('PDF.js no cargó.');
-                // Si es URL, se pide con la cookie de sesión de Keycloak
-                const params = (typeof source === 'string')
+                const params = typeof source === 'string'
                     ? { url: source, withCredentials: true }
                     : source;
                 const pdf = await pdfjsLib.getDocument(params).promise;
-                if (token !== _pdfRenderToken) return false;
+                if (token !== _pdfToken) return false;
 
                 container.innerHTML = '';
-                const scale = 1.5;
-                const dpr = window.devicePixelRatio || 1;
+                const scale = 1.5, dpr = window.devicePixelRatio || 1;
 
                 for (let n = 1; n <= pdf.numPages; n++) {
-                    const page = await pdf.getPage(n);
-                    if (token !== _pdfRenderToken) return false;
-
+                    const page     = await pdf.getPage(n);
+                    if (token !== _pdfToken) return false;
                     const viewport = page.getViewport({ scale });
-                    const canvas = document.createElement('canvas');
-                    const ctx = canvas.getContext('2d');
-                    canvas.width  = Math.floor(viewport.width  * dpr);
-                    canvas.height = Math.floor(viewport.height * dpr);
+                    const canvas   = document.createElement('canvas');
+                    const ctx      = canvas.getContext('2d');
+                    canvas.width   = Math.floor(viewport.width  * dpr);
+                    canvas.height  = Math.floor(viewport.height * dpr);
                     canvas.style.width  = viewport.width  + 'px';
                     canvas.style.height = viewport.height + 'px';
                     container.appendChild(canvas);
-
                     await page.render({
-                        canvasContext: ctx,
-                        viewport,
+                        canvasContext: ctx, viewport,
                         transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null
                     }).promise;
                 }
                 return true;
             } catch (err) {
-                if (token !== _pdfRenderToken) return false;
+                if (token !== _pdfToken) return false;
                 container.innerHTML = '<div class="pdf-loading">No se pudo mostrar el expediente.</div>';
                 showToast('No se pudo mostrar el PDF.', 'error');
                 return false;
             }
         }
 
-        // Descarga el PDF y lo muestra en el visor con UNA sola generación en el servidor.
-        async function generarYDescargar(pdfBase, nombreArchivo) {
-            const resp = await fetch(pdfBase, { credentials: 'same-origin' });
+        // Descarga el PDF (botón ⚡) y lo muestra en el visor con UNA sola
+        // petición al servidor — mismos bytes, dos usos.
+        async function generarYDescargar(url, nombreArchivo) {
+            const resp = await fetch(url, { credentials: 'same-origin' });
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
             const tipo = resp.headers.get('Content-Type') || '';
-            if (!tipo.includes('application/pdf')) {
-                // Si no es PDF, probablemente sea un error/redirección de sesión
-                throw new Error('Respuesta no es PDF (' + tipo + ')');
-            }
-            const blob = await resp.blob();
+            if (!tipo.includes('application/pdf'))
+                throw new Error('La respuesta no es un PDF (' + tipo + ')');
+
+            const blob  = await resp.blob();
 
             // 1) Descarga
             const dlUrl = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = dlUrl;
-            a.download = nombreArchivo;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
+            a.href = dlUrl; a.download = nombreArchivo;
+            document.body.appendChild(a); a.click(); a.remove();
             setTimeout(() => URL.revokeObjectURL(dlUrl), 1500);
 
-            // 2) Visor (copia propia de los bytes; PDF.js puede transferir el buffer)
+            // 2) Visor (bytes propios; PDF.js puede transferir el buffer)
             const data = new Uint8Array(await blob.arrayBuffer());
             return await renderPdf({ data });
         }
@@ -225,12 +216,12 @@ function e($v): string {
                     + '&extra1=' + extra1 + '&extra2=' + extra2
                     + '&_=' + Date.now();
 
-                // Nombre de archivo para la descarga (cédula sin caracteres raros)
+                // Construye el nombre de descarga a partir de la cédula y la fecha
                 const cedulaRaw = document.getElementById('override_cedula').value.replace(/[^0-9A-Za-z_-]/g, '');
-                const fecha = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+                const fecha     = new Date().toISOString().slice(0, 10).replace(/-/g, '');
                 const nombreArchivo = 'expediente_' + (cedulaRaw || 'academico') + '_' + fecha + '.pdf';
 
-                // Descarga el documento Y lo muestra en el visor (una sola generación)
+                // Genera, descarga y muestra en el visor con UNA sola petición
                 const ok = await generarYDescargar(pdfBase, nombreArchivo);
                 if (ok) {
                     showToast('PDF generado, archivado y descargado.', 'success');
@@ -318,26 +309,24 @@ function e($v): string {
                 <p>Ingrese una cédula válida y presione generar PDF.</p>
             </div>
             <div class="pdf-canvas-container" id="pdfViewer"
-                    <?= (!empty($searchCedula) && !empty($records)) ? '' : 'style="display:none;"' ?>></div>
+                 style="<?= (!empty($searchCedula) && !empty($records)) ? '' : 'display:none;' ?>"></div>
         </div>
     </div>
 </div>
 
 <script>
-    // Render automático cuando la página ya carga con un expediente encontrado
     <?php if (!empty($searchCedula) && !empty($records)): ?>
     window.addEventListener('DOMContentLoaded', function () {
         renderPdf('PdfGenerator.php?cedula_query=<?= urlencode($searchCedula) ?>&start=<?= (int)$startYear ?>&end=<?= (int)$endYear ?>');
     });
     <?php endif; ?>
 
-    // Disuasivos cosméticos (NO son protección real; ver nota abajo).
-    // Bloquea menú contextual sobre el visor e intercepta Ctrl+S / Ctrl+P.
+    // Disuasivos cosméticos sobre el visor (no son protección real)
     (function () {
         const viewer = document.getElementById('pdfViewer');
         if (viewer) {
             viewer.addEventListener('contextmenu', e => e.preventDefault());
-            viewer.addEventListener('dragstart', e => e.preventDefault());
+            viewer.addEventListener('dragstart',   e => e.preventDefault());
         }
         document.addEventListener('keydown', function (e) {
             const k = (e.key || '').toLowerCase();

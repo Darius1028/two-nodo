@@ -16,7 +16,7 @@ declare(strict_types=1);
 use App\Exception\SystemException;
 
 require_once __DIR__ . '/../vendor/autoload.php';
-$dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
+$dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/sistema-record-academico');
 $dotenv->safeLoad();
 
 // FIX: este script quedaba público en cualquier entorno -- expone si las
@@ -82,11 +82,19 @@ check('DB principal (academic_records)', function () {
 
 // 4. Conexión a la base externa de roles
 check('DB externa de roles', function () {
-    $ref = new ReflectionClass(App\Security\RoleProvider::class);
-    $method = $ref->getMethod('getConnection');
-    $method->setAccessible(true);
-    $conn = $method->invoke(null);
+    // Usamos DriverManager de Doctrine en lugar de Reflection para probar la conexión
+    $connectionParams = [
+        'host'     => $_ENV['EXTERNAL_ROLES_DB_HOST'] ?? '',
+        'dbname'   => $_ENV['EXTERNAL_ROLES_DB_NAME'] ?? '',
+        'user'     => $_ENV['EXTERNAL_ROLES_DB_USER'] ?? '',
+        // Asumo el nombre de la variable de entorno para la contraseña basándome en tu convención
+        'password' => $_ENV['EXTERNAL_ROLES_DB_PASS'] ?? '',
+        'driver'   => 'pdo_sqlsrv',
+    ];
+
+    $conn = \Doctrine\DBAL\DriverManager::getConnection($connectionParams);
     $result = $conn->fetchOne('SELECT 1');
+
     return "conectado, SELECT 1 = $result";
 });
 

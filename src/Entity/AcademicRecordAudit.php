@@ -43,13 +43,17 @@ class AcademicRecordAudit
     private ?string $nombre = null;
 
     #[ORM\Column(type: Types::STRING, length: 255, nullable: true)]
+    private ?string $apellido = null;
+
+    #[ORM\Column(type: Types::STRING, length: 255, nullable: true)]
     private ?string $email = null;
 
     #[ORM\Column(type: Types::STRING, length: 255, nullable: true)]
-    private ?string $materia = null;
+    private ?string $curso = null;
 
-    #[ORM\Column(type: Types::DECIMAL, precision: 5, scale: 2, nullable: true)]
-    private ?string $nota = null;
+    /** @deprecated Espejo de $curso durante la transición. */
+    #[ORM\Column(type: Types::STRING, length: 255, nullable: true)]
+    private ?string $materia = null;
 
     #[ORM\Column(type: Types::DECIMAL, precision: 5, scale: 2, nullable: true)]
     private ?string $total = null;
@@ -60,23 +64,39 @@ class AcademicRecordAudit
     #[ORM\Column(type: Types::INTEGER, nullable: true)]
     private ?int $anio = null;
 
-    #[ORM\Column(type: Types::STRING, length: 10, nullable: true)]
-    private ?string $origen_tabla = null;
-
     #[ORM\Column(type: Types::STRING, length: 100, nullable: true)]
     private ?string $proceso = null;
 
-    #[ORM\Column(type: Types::STRING, length: 200, nullable: true)]
-    private ?string $grupo_objetivo = null;
+    // FIX: Aplicado camelCase pero manteniendo el nombre original de la columna en BD
+    #[ORM\Column(name: 'grupo_objetivo', type: Types::STRING, length: 200, nullable: true)]
+    private ?string $grupoObjetivo = null;
 
     #[ORM\Column(type: Types::STRING, length: 50, nullable: true)]
     private ?string $modalidad = null;
 
-    #[ORM\Column(type: Types::STRING, length: 20, nullable: true)]
-    private ?string $fecha_inicio = null;
+    // FIX: Aplicado camelCase pero manteniendo el nombre original de la columna en BD
+    #[ORM\Column(name: 'nro_horas', type: Types::SMALLINT, nullable: true)]
+    private ?int $nroHoras = null;
 
     #[ORM\Column(type: Types::STRING, length: 20, nullable: true)]
-    private ?string $fecha_fin = null;
+    private ?string $genero = null;
+
+    #[ORM\Column(type: Types::STRING, length: 100, nullable: true)]
+    private ?string $tipo = null;
+
+    #[ORM\Column(type: Types::STRING, length: 150, nullable: true)]
+    private ?string $cargo = null;
+
+    #[ORM\Column(type: Types::STRING, length: 100, nullable: true)]
+    private ?string $provincia = null;
+
+    // FIX: Aplicado camelCase pero manteniendo el nombre original de la columna en BD
+    #[ORM\Column(name: 'fecha_inicio', type: Types::STRING, length: 20, nullable: true)]
+    private ?string $fechaInicio = null;
+
+    // FIX: Aplicado camelCase pero manteniendo el nombre original de la columna en BD
+    #[ORM\Column(name: 'fecha_fin', type: Types::STRING, length: 20, nullable: true)]
+    private ?string $fechaFin = null;
 
     #[ORM\Column(type: Types::STRING, length: 20, nullable: true)]
     private ?string $aprueba = null;
@@ -140,18 +160,26 @@ class AcademicRecordAudit
         $audit->revisionType   = $revisionType;
         $audit->cedula         = $record->getCedula();
         $audit->nombre         = $record->getNombre();
+        $audit->apellido       = $record->getApellido();
         $audit->email          = $record->getEmail();
+        $audit->curso          = $record->getCurso();
         $audit->materia        = $record->getMateria();
-        $audit->nota           = $record->getNota();
         $audit->total          = $record->getTotal();
         $audit->periodo        = $record->getPeriodo();
         $audit->anio           = $record->getAnio();
-        $audit->origen_tabla   = $record->getOrigenTabla();
         $audit->proceso        = $record->getProceso();
-        $audit->grupo_objetivo = $record->getGrupoObjetivo();
+
+        // Uso de las nuevas variables camelCase
+        $audit->grupoObjetivo  = $record->getGrupoObjetivo();
         $audit->modalidad      = $record->getModalidad();
-        $audit->fecha_inicio   = $record->getFechaInicio();
-        $audit->fecha_fin      = $record->getFechaFin();
+        $audit->nroHoras       = $record->getNroHoras();
+        $audit->genero         = $record->getGenero();
+        $audit->tipo           = $record->getTipo();
+        $audit->cargo          = $record->getCargo();
+        $audit->provincia      = $record->getProvincia();
+        $audit->fechaInicio    = $record->getFechaInicio();
+        $audit->fechaFin       = $record->getFechaFin();
+
         $audit->aprueba        = $record->getAprueba();
         $audit->estado         = $record->getEstado();
         $audit->idPersonaCrea      = $record->getIdPersonaCrea();
@@ -189,18 +217,26 @@ class AcademicRecordAudit
         $audit->revisionType   = $revisionType;
         $audit->cedula         = $s($row['cedula'] ?? null);
         $audit->nombre         = $s($row['nombre'] ?? null);
+        $audit->apellido       = $s($row['apellido'] ?? null);
         $audit->email          = $s($row['email'] ?? null);
+        $audit->curso          = $s($row['curso'] ?? null);
         $audit->materia        = $s($row['materia'] ?? null);
-        $audit->nota           = $s($row['nota'] ?? null);
         $audit->total          = $s($row['total'] ?? null);
         $audit->periodo        = $s($row['periodo'] ?? null);
         $audit->anio           = $i($row['anio'] ?? null);
-        $audit->origen_tabla   = $s($row['origen_tabla'] ?? null);
         $audit->proceso        = $s($row['proceso'] ?? null);
-        $audit->grupo_objetivo = $s($row['grupo_objetivo'] ?? null);
+
+        // Asignación a las variables camelCase, consultando el array con snake_case
+        $audit->grupoObjetivo  = $s($row['grupo_objetivo'] ?? null);
         $audit->modalidad      = $s($row['modalidad'] ?? null);
-        $audit->fecha_inicio   = $s($row['fecha_inicio'] ?? null);
-        $audit->fecha_fin      = $s($row['fecha_fin'] ?? null);
+        $audit->nroHoras       = $i($row['nro_horas'] ?? null);
+        $audit->genero         = $s($row['genero'] ?? null);
+        $audit->tipo           = $s($row['tipo'] ?? null);
+        $audit->cargo          = $s($row['cargo'] ?? null);
+        $audit->provincia      = $s($row['provincia'] ?? null);
+        $audit->fechaInicio    = $s($row['fecha_inicio'] ?? null);
+        $audit->fechaFin       = $s($row['fecha_fin'] ?? null);
+
         $audit->aprueba        = $s($row['aprueba'] ?? null);
         $audit->estado         = $s($row['estado'] ?? null);
         $audit->idPersonaCrea      = $i($row['idPersonaCrea'] ?? null);
@@ -243,17 +279,25 @@ class AcademicRecordAudit
             'cedula'          => $this->cedula,
             'nombre'          => $this->nombre,
             'email'           => $this->email,
+            'apellido'        => $this->apellido,
+            'curso'           => $this->curso,
             'materia'         => $this->materia,
-            'nota'            => $this->nota,
             'total'           => $this->total,
             'periodo'         => $this->periodo,
             'anio'            => $this->anio,
-            'origen_tabla'    => $this->origen_tabla,
             'proceso'         => $this->proceso,
-            'grupo_objetivo'  => $this->grupo_objetivo,
+
+            // Retornamos con las llaves en snake_case para DBAL, pero consultando nuestras propiedades camelCase
+            'grupo_objetivo'  => $this->grupoObjetivo,
             'modalidad'       => $this->modalidad,
-            'fecha_inicio'    => $this->fecha_inicio,
-            'fecha_fin'       => $this->fecha_fin,
+            'nro_horas'       => $this->nroHoras,
+            'genero'          => $this->genero,
+            'tipo'            => $this->tipo,
+            'cargo'           => $this->cargo,
+            'provincia'       => $this->provincia,
+            'fecha_inicio'    => $this->fechaInicio,
+            'fecha_fin'       => $this->fechaFin,
+
             'aprueba'         => $this->aprueba,
             'estado'          => $this->estado,
             'idPersonaCrea'   => $this->idPersonaCrea,

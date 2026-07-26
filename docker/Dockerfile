@@ -56,6 +56,11 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 # cambia -- aprovecha la caché de capas de Docker.
 COPY docker/uploads.ini /usr/local/etc/php/conf.d/uploads.ini
 
+# Pool de PHP-FPM: sin request_terminate_timeout, para que la importación
+# masiva de CSV no la mate FPM a mitad de camino. El prefijo zz- asegura
+# que se cargue después de www.conf y sobrescriba sus valores.
+COPY docker/php-fpm-import.conf /usr/local/etc/php-fpm.d/zz-import.conf
+
 WORKDIR /var/www/html
 
 # Instalar dependencias primero para aprovechar la caché.
@@ -83,8 +88,8 @@ RUN --mount=type=cache,target=/tmp/composer-cache \
         --no-progress \
         --optimize-autoloader
 
-RUN mkdir -p var/cache var/log public/pdfjs \
-    && chown -R www-data:www-data var public/pdfjs
+RUN mkdir -p var/cache var/log public/assets \
+    && chown -R www-data:www-data var public/assets
 
 EXPOSE 9000
 

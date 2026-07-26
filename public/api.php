@@ -13,6 +13,7 @@ use App\Core\EntityManagerProvider;
 use App\Core\RequestContext;
 use App\Entity\AcademicRecord;
 use App\Entity\AcademicDocument;
+use App\Exception\SystemException;
 use App\Security\RateLimiter;
 use App\Security\SecurityContext;
 use App\Service\ConfigService;
@@ -27,6 +28,7 @@ define('METHOD_NOT_ALLOWED', 'Method not allowed');
 define('YEAR_ID_REQUIRED', 'Year and ID parameters required');
 define('QUERY_CEDULA', 'r.cedula = :cedula');
 define('MSG_NOT_FOUND', 'Record not found');
+define('ACTIVE_RECORD_CONDITION', "r.estado != 'X'");
 
 $allowedOrigins = ['https://escuela.funcionjudicial.gob.ec'];
 if (isset($_SERVER['HTTP_ORIGIN']) && in_array($_SERVER['HTTP_ORIGIN'], $allowedOrigins, true)) {
@@ -82,14 +84,6 @@ $requireAdminJson = static function () use ($respond): array {
 try {
     switch ($action) {
         case 'me':
-            // DEBUG TEMPORAL - ELIMINAR DESPUÉS
-            error_log('DEBUG_IP_HEADERS: ' . json_encode([
-                    'REMOTE_ADDR' => $_SERVER['REMOTE_ADDR'] ?? null,
-                    'HTTP_X_FORWARDED_FOR' => $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null,
-                    'HTTP_X_REAL_IP' => $_SERVER['HTTP_X_REAL_IP'] ?? null,
-                    'HTTP_CF_CONNECTING_IP' => $_SERVER['HTTP_CF_CONNECTING_IP'] ?? null,
-                ], JSON_PRETTY_PRINT));
-            // FIN DEBUG
             $user = SecurityContext::getCurrentUser();
             if ($user === null) {
                 $respond(['success' => false, 'error' => 'Not authenticated'], 401);
@@ -112,8 +106,8 @@ try {
             $qb = $em->createQueryBuilder()
                 ->select('r')->from(AcademicRecord::class, 'r')
                 ->where(QUERY_CEDULA)->setParameter('cedula', $cedula)
-                ->andWhere("r.estado != 'X'")
-                ->orderBy('r.origen_tabla', 'DESC');
+                ->andWhere(ACTIVE_RECORD_CONDITION)
+                ->orderBy('r.anio', 'DESC');
             $records = array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
             $respond(['success' => true, 'cedula' => $cedula, 'count' => count($records), 'records' => $records]);
             break;
@@ -141,16 +135,16 @@ try {
             $em = EntityManagerProvider::get();
             $qb = $em->createQueryBuilder()
                 ->select('r')->from(AcademicRecord::class, 'r')
-                ->where('r.origen_tabla = :year')->setParameter('year', (string)$year)
-                ->andWhere("r.estado != 'X'")
+                ->where('r.anio = :year')->setParameter('year', (int)$year)
+                ->andWhere(ACTIVE_RECORD_CONDITION)
                 ->orderBy('r.id', 'DESC')
                 ->setMaxResults($limit)->setFirstResult($offset);
             $records = array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
 
             $countQb = $em->createQueryBuilder()
                 ->select('COUNT(r.id)')->from(AcademicRecord::class, 'r')
-                ->where('r.origen_tabla = :year')->setParameter('year', (string)$year)
-                ->andWhere("r.estado != 'X'");
+                ->where('r.anio = :year')->setParameter('year', (int)$year)
+                ->andWhere(ACTIVE_RECORD_CONDITION);
             $total = (int)$countQb->getQuery()->getSingleScalarResult();
 
             $respond([
@@ -167,22 +161,35 @@ try {
             $year = $getInt($input, 'year', (int)date('Y'));
             $cedula = $getString($input, 'cedula');
             $nombre = $getString($input, 'nombre');
-            $materia = $getString($input, 'materia');
-            if ($cedula === '' || $nombre === '' || $materia === '') {
-                $respond(['success' => false, 'error' => 'Required fields: cedula, nombre, materia'], 400);
+            $curso = $getString($input, 'curso');
+            if ($curso === '') {
+                $curso = $getString($input, 'materia'); // alias legado
+            }
+            if ($cedula === '' || $nombre === '' || $curso === '') {
+                $respond(['success' => false, 'error' => 'Required fields: cedula, nombre, curso'], 400);
             }
             $em = EntityManagerProvider::get();
             $record = new AcademicRecord();
             $record->fill([
                 'cedula' => $cedula,
                 'nombre' => $nombre,
-                'materia' => $materia,
+                'apellido' => $getString($input, 'apellido'),
+                'curso' => $curso,
                 'email' => $getString($input, 'email'),
-                'nota' => $input['nota'] ?? null,
-                'total' => $input['total'] ?? null,
+                'proceso' => $getString($input, 'proceso'),
+                'grupo_objetivo' => $getString($input, 'grupo_objetivo'),
+                'modalidad' => $getString($input, 'modalidad'),
+                'nro_horas' => $input['nro_horas'] ?? null,
+                'genero' => $getString($input, 'genero'),
+                'tipo' => $getString($input, 'tipo'),
+                'cargo' => $getString($input, 'cargo'),
+                'provincia' => $getString($input, 'provincia'),
+                'fecha_inicio' => $getString($input, 'fecha_inicio'),
+                'fecha_fin' => $getString($input, 'fecha_fin'),
+                'total' => $input['total'] ?? ($input['nota'] ?? null), // 'nota' = alias alterno
+                'aprueba' => $getString($input, 'aprueba'),
                 'periodo' => $getString($input, 'periodo'),
                 'anio' => $year,
-                'origen_tabla' => (string)$year,
             ]);
             $record->setAuditoriaCreacion(
                 SecurityContext::getCurrentUserId() ?? 0,
@@ -209,12 +216,31 @@ try {
             if ($record === null) {
                 $respond(['success' => false, 'error' => MSG_NOT_FOUND], 404);
             }
+            $totalCalculado = null;
+            if (isset($input['total']) && $input['total'] !== '') {
+                $totalCalculado = $input['total'];
+            } elseif (isset($input['nota']) && $input['nota'] !== '') {
+                $totalCalculado = $input['nota'];
+            }
             $record->fill([
                 'nombre' => $getString($input, 'nombre'),
+                'apellido' => $getString($input, 'apellido'),
                 'email' => $getString($input, 'email'),
-                'materia' => $getString($input, 'materia'),
-                'nota' => isset($input['nota']) && $input['nota'] !== '' ? $input['nota'] : null,
-                'total' => isset($input['total']) && $input['total'] !== '' ? $input['total'] : null,
+                'curso' => $getString($input, 'curso') !== ''
+                    ? $getString($input, 'curso')
+                    : $getString($input, 'materia'), // alias legado
+                'proceso' => $getString($input, 'proceso'),
+                'grupo_objetivo' => $getString($input, 'grupo_objetivo'),
+                'modalidad' => $getString($input, 'modalidad'),
+                'nro_horas' => isset($input['nro_horas']) && $input['nro_horas'] !== '' ? $input['nro_horas'] : null,
+                'genero' => $getString($input, 'genero'),
+                'tipo' => $getString($input, 'tipo'),
+                'cargo' => $getString($input, 'cargo'),
+                'provincia' => $getString($input, 'provincia'),
+                'fecha_inicio' => $getString($input, 'fecha_inicio'),
+                'fecha_fin' => $getString($input, 'fecha_fin'),
+                'total' => $totalCalculado,
+                'aprueba' => $getString($input, 'aprueba'),
                 'periodo' => $getString($input, 'periodo'),
             ]);
             $record->setAuditoriaModificacion(
@@ -279,6 +305,43 @@ try {
                 ? ErrorFinder::getErrorSummary((int)$yearParam)
                 : ErrorFinder::getErrorSummaryAllYears();
             $respond(['success' => true, 'summary' => $summary]);
+            break;
+
+        case 'import_status':
+            $requireAdminJson();
+            $jobId = $getInt($_GET, 'job_id', $getInt($input, 'job_id', 0));
+            if ($jobId <= 0) {
+                $respond(['success' => false, 'error' => 'job_id required'], 400);
+            }
+            $em = EntityManagerProvider::get();
+            $job = $em->getConnection()->fetchAssociative(
+                'SELECT id, estado, filasProcesadas, filasTotal, filasImportadas, mensajeError,
+                        nombreArchivo, fechaCrea, fechaInicio, fechaFin
+                 FROM Academico.ImportJob WITH (NOLOCK)
+                 WHERE id = ?',
+                [$jobId]
+            );
+            if ($job === false) {
+                $respond(['success' => false, 'error' => 'Job not found'], 404);
+            }
+            $respond(['success' => true, 'job' => $job]);
+            break;
+
+        case 'import_status_latest':
+            // Devuelve el job activo más reciente (PENDIENTE o PROCESANDO)
+            // del usuario actual, para reanudar el polling si vuelve al panel.
+            $requireAdminJson();
+            $em  = EntityManagerProvider::get();
+            $job = $em->getConnection()->fetchAssociative(
+                "SELECT TOP 1 id, estado, filasProcesadas, filasTotal, filasImportadas,
+                              mensajeError, nombreArchivo, fechaCrea, fechaInicio, fechaFin
+                 FROM Academico.ImportJob
+                 WHERE estado IN ('PENDIENTE','PROCESANDO')
+                   AND idPersonaCrea = ?
+                 ORDER BY id DESC",
+                [SecurityContext::getCurrentUserId() ?? 0]
+            );
+            $respond(['success' => true, 'job' => $job ?: null]);
             break;
 
         case 'import_csv':
@@ -349,7 +412,7 @@ try {
             $count = (int)$em->createQueryBuilder()
                 ->select('COUNT(r.id)')->from(AcademicRecord::class, 'r')
                 ->where(QUERY_CEDULA)->setParameter('cedula', $cedula)
-                ->andWhere("r.estado != 'X'")
+                ->andWhere(ACTIVE_RECORD_CONDITION)
                 ->getQuery()->getSingleScalarResult();
             if ($count === 0) {
                 $respond(['success' => false, 'error' => 'No records found for this cedula'], 404);
@@ -366,7 +429,7 @@ try {
         // verificar un certificado escaneando el código, sin cuenta en el
         // sistema. Por eso NO lleva requireRole()/requireAuthentication().
         // Justo por ser público, devuelve el mínimo indispensable para
-        // verificar (nombre + materia + año) -- nunca email, nota, total,
+        // verificar (nombre + materia + año) -- nunca email ni total,
         // id ni ningún otro dato sensible del expediente.
         case 'verify_certificate':
             $cedula = $getString($_GET, 'cedula', $getString($input, 'cedula'));
@@ -376,13 +439,16 @@ try {
             if (!RateLimiter::allow('verify_certificate:' . RequestContext::getClientIp(), 15, 60)) {
                 $respond(['success' => false, 'error' => 'Demasiadas solicitudes. Intentá nuevamente en un minuto.'], 429);
             }
+            if (!RateLimiter::allow('api:' . RequestContext::getClientIp(), 120, 60)) {
+                $respond(['success' => false, 'error' => 'Demasiadas solicitudes.'], 429);
+            }
             $em = EntityManagerProvider::get();
             $rows = $em->createQueryBuilder()
-                ->select('r.nombre', 'r.materia', 'r.origen_tabla')
+                ->select('r.nombre', 'r.apellido', 'r.curso', 'r.materia', 'r.anio')
                 ->from(AcademicRecord::class, 'r')
                 ->where(QUERY_CEDULA)->setParameter('cedula', $cedula)
-                ->andWhere("r.estado != 'X'")
-                ->orderBy('r.origen_tabla', 'DESC')
+                ->andWhere(ACTIVE_RECORD_CONDITION)
+                ->orderBy('r.anio', 'DESC')
                 ->getQuery()->getArrayResult();
 
             if (empty($rows)) {
@@ -391,8 +457,10 @@ try {
 
             $historial = [];
             foreach ($rows as $r) {
-                $anio = $r['origen_tabla'] !== '' ? $r['origen_tabla'] : 'Histórico';
-                $materia = trim((string)$r['materia']);
+                $anio = !empty($r['anio']) ? (string)$r['anio'] : 'Histórico';
+                $materia = trim((string)($r['curso'] ?? '')) !== ''
+                    ? trim((string)$r['curso'])
+                    : trim((string)($r['materia'] ?? ''));
                 if (!isset($historial[$anio])) {
                     $historial[$anio] = [];
                 }
@@ -441,17 +509,17 @@ try {
                     ->from(AcademicRecord::class, 'r')
                     ->where('r.cedula = :cedula')
                     ->setParameter('cedula', $cedula)
-                    ->andWhere("r.estado != 'X'")
-                    ->andWhere('r.origen_tabla >= :startYear')
-                    ->setParameter('startYear', (string) $startYear)
-                    ->andWhere('r.origen_tabla <= :endYear')
-                    ->setParameter('endYear', (string) $endYear)
-                    ->orderBy('r.origen_tabla', 'DESC')
+                    ->andWhere(ACTIVE_RECORD_CONDITION)
+                    ->andWhere('r.anio >= :startYear')
+                    ->setParameter('startYear', (int) $startYear)
+                    ->andWhere('r.anio <= :endYear')
+                    ->setParameter('endYear', (int) $endYear)
+                    ->orderBy('r.anio', 'DESC')
                     ->addOrderBy('r.id', 'DESC')
                     ->setMaxResults(1);
                 $academicRecord = $qb->getQuery()->getOneOrNullResult();
                 if (!$academicRecord instanceof AcademicRecord) {
-                    throw new \RuntimeException('No existe un registro académico al cual asociar el documento.');
+                    throw new SystemException('No existe un registro académico al cual asociar el documento.');
                 }
 
                 $options = [
@@ -485,7 +553,7 @@ try {
 
                 $uuidRepositorio = RepositorioDocumentalService::extraerUuid($resultado);
                 if ($uuidRepositorio === '') {
-                    throw new \RuntimeException(
+                    throw new SystemException(
                         'El Repositorio Documental confirmó la carga, pero no devolvió el UUID del documento.'
                     );
                 }

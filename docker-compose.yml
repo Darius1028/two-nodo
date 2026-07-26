@@ -42,6 +42,31 @@ services:
     networks:
       - app-network
 
+  import-worker:
+    image: academic-php:8.2-dev
+    container_name: academic_import_worker
+    # NOTA: Se eliminó el bloque 'build' para evitar que Docker intente
+    # construir y etiquetar la misma imagen dos veces en paralelo.
+    command: >-
+      sh -c "mkdir -p /var/www/html/var/cache /var/www/html/var/log /var/www/html/var/import-uploads &&
+      chown -R www-data:www-data /var/www/html/var &&
+      chmod -R ug+rwX /var/www/html/var &&
+      exec php bin/import-worker.php"
+    volumes:
+      - .:/var/www/html
+      - vendor_data:/var/www/html/vendor
+      - ./var:/var/www/html/var
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "auth.local:host-gateway"
+    restart: unless-stopped
+    networks:
+      - app-network
+    depends_on:
+      - php-app
+
 networks:
   app-network:
     driver: bridge

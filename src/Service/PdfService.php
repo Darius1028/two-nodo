@@ -134,7 +134,7 @@ class PdfService
 
         if ($startYear !== null && $endYear !== null) {
             $records = array_filter($records, static function ($r) use ($startYear, $endYear) {
-                $rYear = (int)($r['origen_tabla'] ?? 0);
+                $rYear = (int)($r['anio'] ?? 0);
                 return $rYear >= $startYear && $rYear <= $endYear;
             });
         }
@@ -146,14 +146,26 @@ class PdfService
 
         $recordsByYear = [];
         foreach ($records as $record) {
-            $year = $record['origen_tabla'] ?? date('Y');
+            $year = $record['anio'] ?? date('Y');
             $recordsByYear[$year][] = $record;
         }
         krsort($recordsByYear);
 
         $firstRecord = reset($records);
+
+        // Los registros nuevos guardan nombre y apellido por separado; los
+        // históricos traen el nombre completo en [nombre] y [apellido] nulo.
+        $nombreBase = trim((string)($firstRecord['nombre'] ?? ''));
+        $apellido   = trim((string)($firstRecord['apellido'] ?? ''));
+        if ($apellido !== '' && stripos($nombreBase, $apellido) === false) {
+            $nombreBase = trim($nombreBase . ' ' . $apellido);
+        }
+        if ($nombreBase === '') {
+            $nombreBase = 'Estudiante';
+        }
+
         $studentInfo = [
-            'nombre'  => $options['override_name']    ?? ($firstRecord['nombre']  ?? 'Estudiante'),
+            'nombre'  => $options['override_name']    ?? $nombreBase,
             'cedula'  => $cedula,
             'email'   => $options['override_email']   ?? ($firstRecord['email']   ?? 'No registrado'),
             'periodo' => $options['override_periodo'] ?? (($options['start_year'] ?? '') . ' - ' . ($options['end_year'] ?? '')),
@@ -180,7 +192,7 @@ class PdfService
             ->select('r')->from(AcademicRecord::class, 'r')
             ->where('r.cedula = :cedula')->setParameter('cedula', $cedula)
             ->andWhere("r.estado != 'X'")
-            ->orderBy('r.origen_tabla', 'DESC')
+            ->orderBy('r.anio', 'DESC')
             ->addOrderBy('r.id', 'DESC');
         return array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
     }
@@ -270,7 +282,6 @@ class PdfService
     private function addQRCode(string $cedula): void
     {
         $verifyUrl = $this->getVerificationUrl($cedula);
-        $qrPath = sys_get_temp_dir() . '/qr_' . $cedula . '_' . uniqid() . '.png';
 
         $cacheDir  = dirname(__DIR__, 2) . '/var/cache/qr';
         $cacheFile = $cacheDir . '/qr_' . preg_replace('/[^0-9A-Za-z]/', '', $cedula) . '.png';
@@ -418,7 +429,7 @@ class PdfService
 
     private function formatCellValue(string $key, mixed $val): string
     {
-        if (in_array($key, ['nota', 'total'], true) && $val !== '' && $val !== null) {
+        if (in_array($key, ['total'], true) && $val !== '' && $val !== null) {
             $val = number_format((float)$val, 2);
         } elseif ($key === 'created_at' && $val) {
             $val = date('d/m/Y', strtotime((string)$val));
@@ -439,7 +450,7 @@ class PdfService
             . 'a través de la Jefatura de Informática de la Escuela de la Función Judicial, '
             . 'es todo cuanto puedo certificar.';
         $w = $this->pdf->GetPageWidth() - 20;
-        $this->pdf->MultiCell($w, 5, mb_convert_encoding($texto, 'ISO-8859-1', 'UTF-8'), 0, 'J');
+        $this->pdf->MultiCell($w, 5, iconv('UTF-8', 'ISO-8859-1//TRANSLIT//IGNORE', $texto), 0, 'J');
         $this->pdf->Ln(15);
     }
 
