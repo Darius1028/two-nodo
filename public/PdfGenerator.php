@@ -1,14 +1,16 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/../vendor/autoload.php';
+use App\Core\ErrorHandler;
+use App\Security\SecurityContext;
+use App\Service\PdfService;
+
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
 
 // Manejo global de errores -- ver src/Core/ErrorHandler.php
-\App\Core\ErrorHandler::register();
+ErrorHandler::register();
 
-use App\Security\SecurityContext;
-use App\Service\PdfService;
 
 if (ob_get_level() > 0) {
     ob_end_clean();

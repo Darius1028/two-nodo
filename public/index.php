@@ -1,10 +1,13 @@
 <?php
 // public/index.php
 require_once __DIR__ . '/../vendor/autoload.php';
-Dotenv\Dotenv::createImmutable(__DIR__ . '/..')->safeLoad();
-\App\Core\ErrorHandler::register();
 
+use App\Core\ErrorHandler;
 use App\Security\SecurityContext;
+
+Dotenv\Dotenv::createImmutable(__DIR__ . '/..')->safeLoad();
+ErrorHandler::register();
+
 SecurityContext::ensureSession();
 
 $user = SecurityContext::getCurrentUser();

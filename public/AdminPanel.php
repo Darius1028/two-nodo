@@ -1,19 +1,21 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/../vendor/autoload.php';
-$dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
-$dotenv->safeLoad();
-
-// Manejo global de errores -- ver src/Core/ErrorHandler.php
-\App\Core\ErrorHandler::register();
 
 use App\Core\EntityManagerProvider;
+use App\Core\ErrorHandler;
 use App\Core\RequestContext;
 use App\Entity\AcademicRecord;
 use App\Security\SecurityContext;
 use App\Service\ConfigService;
 use App\Service\CsvService;
 use App\Service\ErrorFinder;
+
+$dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
+$dotenv->safeLoad();
+
+// Manejo global de errores -- ver src/Core/ErrorHandler.php
+ErrorHandler::register();
 
 SecurityContext::ensureSession();
 SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO');
@@ -380,9 +382,9 @@ $csrf = csrfToken();
         .nav-tab.active { background: #003366; color: white; border-color: #003366; }
         .tab-content { display: none; background: white; border-radius: 0 6px 6px 6px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
         .tab-content.active { display: block; }
-        .form-group { margin-bottom: 12px; }
-        label { display: block; margin-bottom: 4px; font-weight: 500; font-size: 13px; }
-        input[type="text"], input[type="password"], input[type="number"], select { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+        .form-group { margin-bottom: 8px; } /* Menos espacio entre campos */
+        label { display: block; margin-bottom: 2px; font-weight: 500; font-size: 12px; } /* Letra un poco más chica */
+        input[type="text"], input[type="password"], input[type="number"], select { width: 100%; padding: 6px 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; } /* Inputs un poco más delgados */
         .btn { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; font-size: 14px; text-decoration: none; display: inline-block; }
         .btn-primary { background: #003366; color: white; }
         .btn-primary:hover { background: #002244; }
@@ -401,7 +403,16 @@ $csrf = csrfToken();
         .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #e1e5eb; }
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
         .modal.active { display: flex; }
-        .modal-content { background: white; padding: 25px; border-radius: 8px; max-width: 800px; width: 90%; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
+        .modal-content {
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            max-width: 800px;
+            width: 90%;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+            max-height: 90vh;      /* Limita la altura al 90% de la pantalla */
+            overflow-y: auto;      /* Agrega un scroll interno si es necesario */
+        }
         .modal-sm { max-width: 400px; text-align: center; }
         .builder-toolbar { background: #eef2f7; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 15px; align-items: center; }
         .sortable-item { display: flex; align-items: center; gap: 10px; padding: 12px; background: white; border: 1px solid #ddd; border-radius: 6px; margin-bottom: 8px; cursor: grab; }

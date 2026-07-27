@@ -3,13 +3,9 @@ declare(strict_types=1);
 header('Content-Type: application/json; charset=utf-8');
 
 require_once __DIR__ . '/../vendor/autoload.php';
-$dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
-$dotenv->safeLoad();
-
-// Manejo global de errores -- ver src/Core/ErrorHandler.php
-\App\Core\ErrorHandler::register();
 
 use App\Core\EntityManagerProvider;
+use App\Core\ErrorHandler;
 use App\Core\RequestContext;
 use App\Entity\AcademicRecord;
 use App\Entity\AcademicDocument;
@@ -21,6 +17,12 @@ use App\Service\CsvService;
 use App\Service\ErrorFinder;
 use App\Service\PdfService;
 use App\Service\RepositorioDocumentalService;
+
+$dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
+$dotenv->safeLoad();
+
+// Manejo global de errores -- ver src/Core/ErrorHandler.php
+ErrorHandler::register();
 
 SecurityContext::ensureSession();
 

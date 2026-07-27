@@ -38,7 +38,7 @@
             "key": "nro_horas",
             "label": "Horas",
             "width": 20,
-            "visible": true
+            "visible": false
         },
         {
             "key": "periodo",

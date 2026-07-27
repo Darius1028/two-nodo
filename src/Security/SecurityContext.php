@@ -4,10 +4,6 @@ declare(strict_types=1);
 
 namespace App\Security;
 
-use App\Security\KeycloakClient;
-use App\Security\RoleProvider;
-use App\Security\AuthResponder;
-
 /**
  * Gestiona la sesión del usuario autenticado vía Keycloak, la resolución
  * de roles desde la base institucional externa y las redirecciones de

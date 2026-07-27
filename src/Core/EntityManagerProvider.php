@@ -3,7 +3,6 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use App\Core\RequestContext;
 use Doctrine\ORM\EntityManagerInterface;
 
 class EntityManagerProvider

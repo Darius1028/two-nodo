@@ -1,15 +1,16 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/../vendor/autoload.php';
+use App\Core\EntityManagerProvider;
+use App\Core\ErrorHandler;
+use App\Entity\AcademicRecord;
+use App\Security\SecurityContext;
+
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
 
 // Manejo global de errores -- ver src/Core/ErrorHandler.php
-\App\Core\ErrorHandler::register();
-
-use App\Core\EntityManagerProvider;
-use App\Entity\AcademicRecord;
-use App\Security\SecurityContext;
+ErrorHandler::register();
 
 SecurityContext::ensureSession();
 
@@ -60,7 +61,9 @@ function e($v): string {
         #toast.error   { background: #dc3545; }
         .container { max-width: 1400px; margin: 0 auto; }
         .workspace-layout { display: grid; grid-template-columns: 420px 1fr; gap: 20px; margin-top: 20px; }
-        @media(max-width: 1024px) { .workspace-layout { grid-template-columns: 1fr; } }
+        @media(max-width: 1024px) {
+            .workspace-layout { grid-template-columns: 1fr; }
+        }
         .panel-sidebar { display: flex; flex-direction: column; gap: 20px; }
         .card { background: white; border-radius: 10px; padding: 25px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
         .card h3 { color: #003366; font-size: 1.1rem; margin-bottom: 15px; border-bottom: 2px solid #f0f2f5; padding-bottom: 8px; }
