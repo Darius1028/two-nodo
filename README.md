@@ -246,15 +246,15 @@ docker-compose up -d --build
 docker-compose ps
 ```
 
-La aplicación estará disponible en `http://localhost:8090`.
+La aplicación estará disponible en `http://localhost:8010`.
 
-> El puerto del host es **8090** (no 80) para evitar conflictos con otros servicios locales. El contenedor Nginx escucha en el puerto 80 internamente.
+> El puerto del host es **8010** (no 80) para evitar conflictos con otros servicios locales. El contenedor Nginx escucha en el puerto 80 internamente.
 
 ### Servicios Docker
 
-| Servicio | Imagen | Puerto | Descripción |
-|---|---|---|---|
-| `nginx` | nginx:alpine | `8090:80` | Servidor web / proxy inverso |
+| Servicio | Imagen | Puerto           | Descripción |
+|---|---|------------------|---|
+| `nginx` | nginx:alpine | `8010:80`        | Servidor web / proxy inverso |
 | `php-app` | (Dockerfile local) | `9000` (interno) | PHP 8.2-FPM con driver SQL Server |
 
 ### Límites de subida y memoria

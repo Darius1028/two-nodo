@@ -104,7 +104,7 @@ reinicio_normal() {
     echo
     echo "=============================================="
     echo " Reinicio normal completado correctamente"
-    echo " Aplicación: http://localhost:8090"
+    echo " Aplicación: http://localhost:8010"
     echo "=============================================="
 }
 
@@ -155,7 +155,7 @@ limpieza_completa() {
     echo
     echo "=============================================="
     echo " Limpieza y reconstrucción completadas"
-    echo " Aplicación: http://localhost:8090"
+    echo " Aplicación: http://localhost:8010"
     echo "=============================================="
 }
 
