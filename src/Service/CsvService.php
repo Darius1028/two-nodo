@@ -14,18 +14,20 @@ class CsvService
 {
     /**
      * Filas agrupadas por statement de INSERT. Límite práctico de SQL Server:
-     * 2100 parámetros por sentencia. Cada fila manda 23 parámetros (todas
+     * 2100 parámetros por sentencia. Cada fila manda 28 parámetros (todas
      * las columnas de AcademicRecord::toArray() salvo id/fechaCrea/
      * fechaModifica, que van sin bind: id es IDENTITY y las fechas usan
-     * GETDATE() literal). 2100/23 ≈ 91 -- se deja margen en 80.
+     * GETDATE() literal), más 1 parámetro único para la revisión de
+     * auditoría (el lote, no por fila). 60 filas x 28
+     * + 1 = 1681 parámetros -- deja margen razonable bajo el límite.
+     *
+     * OJO: si se agregan columnas a la entidad hay que recalcular esto,
+     * o el INSERT falla con "Too many parameters".
      */
-    private const ROWS_PER_INSERT = 80;
+    private const ROWS_PER_INSERT = 60;
 
-    /**
-     * Filas por batch en el INSERT de auditoría AUD. La tabla tiene 28
-     * columnas con parámetros → 2100 / 28 ≈ 75. Se deja margen en 70.
-     */
-    private const AUD_ROWS_PER_BATCH = 70;
+    /** Cada cuántas filas se deja rastro del avance en el log de PHP. */
+    private const PROGRESS_EVERY = 5000;
 
     /**
      * Encabezados EXACTOS que debe traer el CSV, en este orden -- definidos
@@ -37,16 +39,53 @@ class CsvService
         'Curso',
         'Grupo Objetivo',
         'Modalidad',
-        'N de Horas',
+        'Nro. de Horas',
         'Fecha Inicio',
         'Facha Fin',
         'Cedula',
         'Nombre',
         'Apellido',
         'Email',
+        'Genero',
+        'Tipo',
+        'Cargo',
+        'Provincia',
         'Total',
         'Aprueba',
         'Año',
+    ];
+
+    /**
+     * Variantes aceptadas por columna (además del nombre canónico de
+     * EXPECTED_HEADERS). Se comparan normalizadas -- sin tildes, sin
+     * mayúsculas y sin puntuación -- para que un archivo exportado desde
+     * el Excel original no se rechace por diferencias cosméticas.
+     *
+     * La posición sigue siendo obligatoria: sólo se flexibiliza el nombre.
+     *
+     * @var array<string, string[]>
+     */
+    private const HEADER_VARIANTS = [
+        'Nro. de Horas' => [
+            'N de Horas',
+            'Nro de Horas',
+            'Numero de Horas',
+            'Nro. de Horas Planificadas para desarrollar el curso',
+            'Horas',
+        ],
+        'Cedula'   => ['Número de ID', 'Numero de ID', 'Identificacion', 'CI'],
+        'Nombre'   => ['Nombres'],
+        'Apellido' => ['Apellidos', 'Apellido(s)'],
+        'Email'    => [
+            'Dirección de correo personal',
+            'Correo',
+            'Correo personal',
+            'Correo electronico',
+        ],
+        'Genero'   => ['Género', 'Sexo'],
+        'Facha Fin' => ['Fecha Fin', 'Fecha de Fin'],
+        'Fecha Inicio' => ['Fecha de Inicio'],
+        'Año'      => ['AÑO', 'Anio', 'Ano', 'Periodo'],
     ];
 
     /**
@@ -74,17 +113,47 @@ class CsvService
 
         foreach ($expected as $i => $expectedName) {
             $actualName = $actual[$i] ?? '';
-            if ($actualName !== $expectedName) {
-                $errors[] = sprintf(
-                    'Columna %d: se encontró "%s", se esperaba "%s".',
-                    $i + 1,
-                    $actualName,
-                    $expectedName
-                );
+
+            if (self::headerMatches($actualName, $expectedName)) {
+                continue;
             }
+
+            $errors[] = sprintf(
+                'Columna %d: se encontró "%s", se esperaba "%s".',
+                $i + 1,
+                $actualName,
+                $expectedName
+            );
         }
 
         return $errors;
+    }
+
+    /**
+     * Compara un encabezado real contra el esperado, aceptando las
+     * variantes declaradas en HEADER_VARIANTS. La comparación se hace
+     * normalizada para tolerar tildes, mayúsculas y puntuación.
+     */
+    private static function headerMatches(string $actual, string $expected): bool
+    {
+        $normalize = static function (string $v): string {
+            $v = self::normalizeString($v);
+            return preg_replace('/[^a-z0-9]/', '', $v) ?? '';
+        };
+
+        $actualNorm = $normalize($actual);
+
+        if ($actualNorm === $normalize($expected)) {
+            return true;
+        }
+
+        foreach (self::HEADER_VARIANTS[$expected] ?? [] as $variant) {
+            if ($actualNorm === $normalize($variant)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public static function importCSV(
@@ -92,7 +161,8 @@ class CsvService
         int $fallbackYear,
         int $idPersona = 0,
         string $ip = '',
-        string $equipo = ''
+        string $equipo = '',
+        ?callable $onProgress = null
     ): array {
         $result = ['success' => false, 'imported' => 0, 'errors' => []];
         $em = EntityManagerProvider::get();
@@ -107,8 +177,10 @@ class CsvService
             . ' | equipo="' . $equipo . '"');
 
         try {
-            if (!file_exists($filePath) || !is_readable($filePath)) {
-                throw new SystemException('El archivo CSV no se puede leer.');
+            // Validar tamaño antes de procesar
+            $maxSize = 128 * 1024 * 1024; // 128MB
+            if (filesize($filePath) > $maxSize) {
+                throw new ValidationException('El archivo excede el tamaño máximo de 128MB');
             }
 
             [$stream, $dataOffset] = self::openStreamUtf8($filePath);
@@ -132,16 +204,16 @@ class CsvService
 
             $header = array_map([self::class, 'normalizeString'], $rawHeader);
 
+            self::toggleIndexes($conn, disable: true);
             $conn->beginTransaction();
 
-            // Pasamos los datos de auditoría en un array para no exceder
-            // el límite de parámetros permitidos por SonarQube (S107)
             $count = self::processAndInsertRows(
                 $stream,
                 $separator,
                 $header,
                 $fallbackYear,
-                [$idPersona, $ip, $equipo]
+                [$idPersona, $ip, $equipo],
+                $onProgress
             );
 
             $conn->commit();
@@ -159,8 +231,47 @@ class CsvService
             if (is_resource($stream)) {
                 fclose($stream);
             }
+
+            try {
+                self::toggleIndexes($conn, disable: false);
+            } catch (\Throwable $e) {
+                error_log(
+                    '[CsvService] ALERTA: no se pudieron reconstruir los índices '
+                    . 'de Academico.RecordAcademico tras la importación: ' . $e->getMessage()
+                    . '. Ejecutar manualmente: ALTER INDEX ALL ON [Academico].[RecordAcademico] REBUILD;'
+                );
+            }
         }
         return $result;
+    }
+
+    private static function toggleIndexes(\Doctrine\DBAL\Connection $conn, bool $disable): void
+    {
+        $accion = $disable ? 'DISABLE' : 'REBUILD';
+
+        $indices = $conn->fetchFirstColumn(
+            "SELECT i.name FROM sys.indexes i
+             WHERE i.object_id = OBJECT_ID('Academico.RecordAcademico')
+               AND i.type <> 0        -- excluye heap
+               AND i.is_primary_key = 0
+               AND i.name IS NOT NULL"
+        );
+
+        foreach ($indices as $indexName) {
+            $conn->executeStatement(
+                sprintf(
+                    'ALTER INDEX [%s] ON [Academico].[RecordAcademico] %s',
+                    str_replace(']', ']]', $indexName),
+                    $accion
+                )
+            );
+        }
+
+        error_log(sprintf(
+            '[CsvService] Índices de RecordAcademico: %s aplicado a %d índice(s).',
+            $accion,
+            count($indices)
+        ));
     }
 
     /**
@@ -171,7 +282,8 @@ class CsvService
         string $separator,
         array $header,
         int $fallbackYear,
-        array $auditData
+        array $auditData,
+        ?callable $onProgress = null
     ): int {
         $em = EntityManagerProvider::get();
         $conn = $em->getConnection();
@@ -186,16 +298,17 @@ class CsvService
 
         $count = 0;
         $pendingRows = [];
-        // Desempaquetar auditoría
         [$idPersona, $ip, $equipo] = $auditData;
 
+        $revId = self::createRevision($conn);
+        $inicio = microtime(true);
+
+        // Extracción para SonarQube: Se delegó la creación de la tabla a otra función
+        self::createStagingTable($conn);
+
         while (($data = fgetcsv($stream, 10000, $separator)) !== false) {
-            if (count($data) < count($header)) {
-                $data = array_pad($data, count($header), '');
-            } elseif (count($data) > count($header)) {
-                $data = array_slice($data, 0, count($header));
-            }
-            $row = array_combine($header, $data);
+            // Extracción para SonarQube: Limpieza del Array extraida a otra función
+            $row = self::combineRowData($data, $header);
             $cleanParams = self::buildInsertParams($row, $schema, $fallbackYear);
 
             $record = new AcademicRecord();
@@ -209,47 +322,118 @@ class CsvService
             $count++;
 
             if (count($pendingRows) >= self::ROWS_PER_INSERT) {
-                $inserted = self::bulkInsertBatch($conn, $classMetadata, $qualifiedTableName, $pendingRows);
-                self::bulkInsertAudit($conn, $inserted);
+                self::bulkInsertBatchWithAudit($conn, $classMetadata, $qualifiedTableName, $pendingRows, $revId);
                 $pendingRows = [];
+                if ($onProgress !== null) {
+                    $onProgress($count);
+                }
+            }
+
+            if ($count % self::PROGRESS_EVERY === 0) {
+                error_log(sprintf(
+                    '[CsvService] avance: %d filas procesadas en %.1f s',
+                    $count,
+                    microtime(true) - $inicio
+                ));
             }
         }
 
         if (!empty($pendingRows)) {
-            $inserted = self::bulkInsertBatch($conn, $classMetadata, $qualifiedTableName, $pendingRows);
-            self::bulkInsertAudit($conn, $inserted);
+            self::bulkInsertBatchWithAudit($conn, $classMetadata, $qualifiedTableName, $pendingRows, $revId);
         }
+
+        // Extracción para SonarQube: El drop de la tabla se encapsuló en un método aparte
+        self::dropStagingTable($conn);
+
+        if ($onProgress !== null) {
+            $onProgress($count);
+        }
+
+        error_log(sprintf(
+            '[CsvService] importación finalizada: %d filas en %.1f s (revisión %d)',
+            $count,
+            microtime(true) - $inicio,
+            $revId
+        ));
 
         return $count;
     }
 
+    private static function combineRowData(array $data, array $header): array
+    {
+        $headerCount = count($header);
+        $dataCount = count($data);
+
+        if ($dataCount < $headerCount) {
+            $data = array_pad($data, $headerCount, '');
+        } elseif ($dataCount > $headerCount) {
+            $data = array_slice($data, 0, $headerCount);
+        }
+
+        return array_combine($header, $data);
+    }
+
+    private static function createStagingTable(\Doctrine\DBAL\Connection $conn): void
+    {
+        $colDefs = $conn->fetchAllAssociative(
+            "SELECT COLUMN_NAME, DATA_TYPE,
+                    CHARACTER_MAXIMUM_LENGTH,
+                    NUMERIC_PRECISION, NUMERIC_SCALE,
+                    IS_NULLABLE
+             FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = 'Academico'
+               AND TABLE_NAME   = 'RecordAcademico'
+               AND COLUMN_NAME  <> 'id'
+             ORDER BY ORDINAL_POSITION"
+        );
+        $stageCols = array_map(static function (array $col): string {
+            $type = strtoupper($col['DATA_TYPE']);
+            $def  = '[' . $col['COLUMN_NAME'] . ']';
+            if (in_array($type, ['CHAR','VARCHAR','NCHAR','NVARCHAR'], true)) {
+                $len = $col['CHARACTER_MAXIMUM_LENGTH'];
+                $def .= ' ' . $type . '(' . ($len === null || $len == -1 ? 'MAX' : $len) . ')';
+            } elseif (in_array($type, ['DECIMAL','NUMERIC'], true)) {
+                $def .= ' ' . $type . '(' . $col['NUMERIC_PRECISION'] . ',' . $col['NUMERIC_SCALE'] . ')';
+            } else {
+                $def .= ' ' . $type;
+            }
+            $def .= $col['IS_NULLABLE'] === 'YES' ? ' NULL' : ' NOT NULL';
+            return $def;
+        }, $colDefs);
+
+        $conn->executeStatement(
+            "IF OBJECT_ID('tempdb..#stage_auditoria') IS NOT NULL DROP TABLE [#stage_auditoria];
+             CREATE TABLE [#stage_auditoria] (
+                 [id] INT NOT NULL,
+                 " . implode(",\n                 ", $stageCols) . "
+             );"
+        );
+
+    }
+
+    private static function dropStagingTable(\Doctrine\DBAL\Connection $conn): void
+    {
+        try {
+            $conn->executeStatement("IF OBJECT_ID('tempdb..#stage_auditoria') IS NOT NULL DROP TABLE #stage_auditoria;");
+        } catch (\Throwable $e) {
+            error_log('[CsvService] no se pudo limpiar #stage_auditoria (no crítico): ' . $e->getMessage());
+        }
+    }
+
     /**
-     * Inserta un lote de filas en un único statement multi-VALUES, sin
-     * pasar por el UnitOfWork del ORM (evita el overhead de hidratar y
-     * trackear 200k+ entidades, que además de lento se come memoria).
-     *
-     * Usa OUTPUT INSERTED.* para capturar los datos reales escritos,
-     * incluyendo el id IDENTITY y las fechas resueltas por GETDATE(),
-     * necesarios para el INSERT de auditoría en AUD.
-     *
-     * @param array<int, array<string, mixed>> $rows Filas ya resueltas vía
-     *        AcademicRecord::toArray() (sin 'id', 'fechaCrea' ni
-     *        'fechaModifica' -- esas dos se completan acá con GETDATE()).
-     * @return array<int, array<string, mixed>> Filas tal como quedaron en BD.
+     * Inserta un lote de filas y escribe su auditoría en UN SOLO viaje de red.
      */
-    private static function bulkInsertBatch(
+    private static function bulkInsertBatchWithAudit(
         \Doctrine\DBAL\Connection $conn,
         \Doctrine\ORM\Mapping\ClassMetadata $classMetadata,
         string $tableName,
-        array $rows
-    ): array {
+        array $rows,
+        int $revId
+    ): void {
         if (empty($rows)) {
-            return [];
+            return;
         }
 
-        // Todas las filas traen exactamente las mismas claves (salen de
-        // AcademicRecord::toArray() menos id/fechaCrea/fechaModifica), así
-        // que alcanza con mirar la primera para fijar el orden de columnas.
         $fields = array_keys($rows[0]);
         $columns = array_map(
             static fn(string $field) => $classMetadata->getColumnName($field),
@@ -258,24 +442,25 @@ class CsvService
         $columns[] = $classMetadata->getColumnName('fechaCrea');
         $columns[] = $classMetadata->getColumnName('fechaModifica');
 
-        // OUTPUT INSERTED.* devuelve cada fila tal como quedó en la tabla,
-        // incluido el id generado por IDENTITY y las fechas de GETDATE().
-        $outputCols = array_map(
-            static fn(string $c) => 'INSERTED.' . $c,
-            array_merge(['id'], $columns)
-        );
-
-        // GETDATE() es una expresión literal, no un parámetro: se resuelve
-        // en el propio SQL Server al momento del INSERT. Evita depender del
-        // formato exacto que produce/espera SqlServerDateTimeType.
         $singleRowPlaceholders = '(' . implode(',', array_fill(0, count($fields), '?')) . ',GETDATE(),GETDATE())';
-        $sql = sprintf(
-            'INSERT INTO %s (%s) OUTPUT %s VALUES %s',
+
+        $insertPrincipal = sprintf(
+            'TRUNCATE TABLE [#stage_auditoria];
+             INSERT INTO %s (%s) OUTPUT INSERTED.* INTO [#stage_auditoria] VALUES %s;',
             $tableName,
             implode(',', $columns),
-            implode(',', $outputCols),
             implode(',', array_fill(0, count($rows), $singleRowPlaceholders))
         );
+
+        $insertAuditoria = sprintf(
+            'INSERT INTO AcademicoAUD.RecordAcademico_AUD (id, REV, REVTYPE, %s)
+             SELECT id, ?, %d, %s FROM [#stage_auditoria];',
+            implode(',', $columns),
+            AcademicRecordAudit::INSERT,
+            implode(',', $columns)
+        );
+
+        $sql = $insertPrincipal . "\n" . $insertAuditoria;
 
         $params = [];
         foreach ($rows as $row) {
@@ -283,107 +468,67 @@ class CsvService
                 $params[] = $row[$field];
             }
         }
+        $params[] = $revId;
 
-        return $conn->executeQuery($sql, $params)->fetchAllAssociative();
+        $conn->executeStatement($sql, $params);
     }
 
-    /**
-     * Inserta en AUD.REVINFO y AcademicoAUD.RecordAcademico_AUD las filas devueltas
-     * por bulkInsertBatch. Usa AcademicRecordAudit::fromRawRow() + toInsertArray()
-     * para que la entidad sea la única fuente de verdad del mapeo de columnas.
-     * Se procesa en chunks de AUD_ROWS_PER_BATCH para no superar el límite de
-     * 2100 parámetros de SQL Server.
-     *
-     * @param array<int, array<string, mixed>> $insertedRows
-     */
-    private static function bulkInsertAudit(
-        \Doctrine\DBAL\Connection $conn,
-        array $insertedRows
-    ): void {
-        if (empty($insertedRows)) {
-            return;
+    private static function createRevision(\Doctrine\DBAL\Connection $conn): int
+    {
+        $revId = $conn->fetchOne(
+            'INSERT INTO AUD.REVINFO (REVTSTMP) OUTPUT INSERTED.REV VALUES (?)',
+            [(string) round(microtime(true) * 1000)]
+        );
+
+        if ($revId === false) {
+            throw new ValidationException('No se pudo generar la revisión de auditoría para la importación CSV.');
         }
 
-        foreach (array_chunk($insertedRows, self::AUD_ROWS_PER_BATCH) as $chunk) {
-            $revId = $conn->fetchOne(
-                'INSERT INTO AUD.REVINFO (REVTSTMP) OUTPUT INSERTED.REV VALUES (?)',
-                [(string) round(microtime(true) * 1000)]
-            );
-
-            if ($revId === false) {
-                throw new ValidationException('No se pudo generar la revisión de auditoría para el batch CSV.');
-            }
-
-            $audits = array_map(
-                static fn(array $row) => AcademicRecordAudit::fromRawRow($row, (int) $revId, AcademicRecordAudit::INSERT),
-                $chunk
-            );
-
-            $audColumns = array_keys($audits[0]->toInsertArray());
-            $placeholder = '(' . implode(',', array_fill(0, count($audColumns), '?')) . ')';
-
-            $sql = sprintf(
-                'INSERT INTO AcademicoAUD.RecordAcademico_AUD (%s) VALUES %s',
-                implode(',', $audColumns),
-                implode(',', array_fill(0, count($audits), $placeholder))
-            );
-
-            $params = [];
-            foreach ($audits as $audit) {
-                foreach ($audit->toInsertArray() as $value) {
-                    $params[] = $value;
-                }
-            }
-
-            $conn->executeStatement($sql, $params);
-        }
+        return (int) $revId;
     }
 
     public static function validateCSV(string $filePath): array
     {
         $result = ['success' => false, 'rows' => 0, 'errors' => []];
+
         if (!file_exists($filePath) || !is_readable($filePath)) {
             $result['errors'][] = 'No se puede leer el archivo.';
-            return $result;
+            return $result; // Retorno 1
         }
+
         $stream = fopen($filePath, 'r');
         if ($stream === false) {
             $result['errors'][] = 'No se pudo abrir el archivo.';
-            return $result;
+            return $result; // Retorno 2
         }
-        // Mismo detector que importCSV() -- si no coinciden, un archivo
-        // separado por ';' se leería acá como una sola columna gigante y
-        // el error de encabezado confundiría (parecería un problema de
-        // nombres cuando en realidad es el separador).
+
         $separator = self::detectSeparator($stream);
         rewind($stream);
 
         $rawHeader = fgetcsv($stream, 10000, $separator);
+
         if (!$rawHeader || count($rawHeader) < 2) {
-            fclose($stream);
             $result['errors'][] = 'Formato CSV inválido.';
-            return $result;
+        } else {
+            $headerErrors = self::validateHeaderColumns($rawHeader);
+            if (!empty($headerErrors)) {
+                $result['errors'] = array_merge(
+                    ['Las columnas del archivo no coinciden con el formato requerido:'],
+                    $headerErrors,
+                    ['Columnas esperadas, en este orden exacto: ' . implode(', ', self::EXPECTED_HEADERS)]
+                );
+            } else {
+                $rows = 0;
+                while (fgetcsv($stream, 10000, $separator) !== false) {
+                    $rows++;
+                }
+                $result['success'] = true;
+                $result['rows'] = $rows;
+            }
         }
 
-        $headerErrors = self::validateHeaderColumns($rawHeader);
-        if (!empty($headerErrors)) {
-            fclose($stream);
-            $result['errors'] = array_merge(
-                ['Las columnas del archivo no coinciden con el formato requerido:'],
-                $headerErrors,
-                ['Columnas esperadas, en este orden exacto: ' . implode(', ', self::EXPECTED_HEADERS)]
-            );
-            return $result;
-        }
-
-        $rows = 0;
-        while (fgetcsv($stream, 10000, $separator) !== false) {
-            $rows++;
-        }
         fclose($stream);
-        $result['success'] = true;
-        $result['rows'] = $rows;
-        return $result;
+        return $result; // Retorno 3
     }
 
     public static function exportCSV(int $year, string $outputPath, string $cedula = ''): array
@@ -393,14 +538,15 @@ class CsvService
             $em = EntityManagerProvider::get();
             $qb = $em->createQueryBuilder()
                 ->select('r')->from(AcademicRecord::class, 'r')
-                ->orderBy('r.origen_tabla', 'DESC')
+                ->orderBy('r.anio', 'DESC')
                 ->addOrderBy('r.id', 'DESC');
 
             if ($cedula !== '') {
                 $qb->where('r.cedula = :cedula')->setParameter('cedula', $cedula);
             } else {
-                $qb->where('r.origen_tabla = :year')->setParameter('year', (string)$year);
+                $qb->where('r.anio = :year')->setParameter('year', (int)$year);
             }
+            $qb->andWhere("r.estado != 'X'");
 
             $records = array_map(
                 static fn(AcademicRecord $r) => $r->toArray(),
@@ -451,7 +597,7 @@ class CsvService
             $path = ConfigService::getHistorialPath();
             $dir = dirname($path);
             if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
-                throw new \RuntimeException("No se pudo crear el directorio de historial: {$dir}");
+                throw new SystemException("No se pudo crear el directorio de historial: {$dir}");
             }
 
             $history = file_exists($path)
@@ -469,10 +615,9 @@ class CsvService
 
             $json = json_encode($history, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
             if (file_put_contents($path, $json, LOCK_EX) === false) {
-                throw new \RuntimeException("No se pudo escribir el historial: {$path}");
+                throw new SystemException("No se pudo escribir el historial: {$path}");
             }
         } catch (\Throwable $e) {
-            // El historial es secundario: nunca debe convertir una operación exitosa en un fallo.
             error_log(sprintf('No se pudo registrar el historial (%s): %s', $action, $e->getMessage()));
         }
     }
@@ -520,18 +665,29 @@ class CsvService
             'apellido'       => ['apellidos', 'apellido paterno', 'apellido materno'],
             'cedula'         => ['identificacion', 'dni', 'documento', 'c.i.', 'ci'],
             'anio'           => ['ano', 'periodo', 'year', 'año'],
-            'nota'           => ['nro de horas', 'horas', 'calificacion', 'nota', 'puntaje'],
-            'total'          => ['total', 'suma', 'definitiva', 'calificacion total'],
-            'materia'        => ['curso', 'evento', 'capacitacion', 'tema'],
+
+            // NOTA: 'nro de horas' y 'horas' estaban acá y hacían que las horas
+            // del curso se guardaran como si fueran la calificación. Las horas
+            // ahora tienen su propia columna (nro_horas).
+
+            'total'          => ['total', 'nota', 'calificacion', 'puntaje', 'definitiva'],
+            'nro_horas'      => ['nro de horas', 'n de horas', 'numero de horas', 'horas'],
+            'curso'          => ['curso', 'materia', 'evento', 'capacitacion', 'tema'],
             'fecha_inicio'   => ['inicio', 'desde', 'fecha de inicio'],
             'fecha_fin'      => ['fin', 'hasta', 'fecha de fin'],
-            'grupo_objetivo' => ['grupo obj', 'grupo', 'dirigido a'],
+            'grupo_objetivo' => ['grupo objetivo', 'grupo obj', 'dirigido a'],
             'email'          => ['correo', 'e-mail', 'mail', 'correo electronico'],
+            'genero'         => ['genero', 'sexo'],
+            'tipo'           => ['tipo'],
+            'cargo'          => ['cargo', 'funcion'],
+            'provincia'      => ['provincia'],
         ];
+
         $searchTerms = isset($aliases[$key])
             ? array_merge([$keyNorm, $label], $aliases[$key])
             : [$keyNorm, $label];
         $searchTerms = array_filter($searchTerms);
+
         foreach ($normalizedRow as $rowKey => $rowVal) {
             foreach ($searchTerms as $term) {
                 if ($term !== '' && strpos((string)$rowKey, (string)$term) !== false) {
@@ -549,38 +705,30 @@ class CsvService
 
         $nombreVal   = (string)(self::findValue($row, $schema, 'nombre') ?? '');
         $apellidoVal = (string)(self::findValue($row, $schema, 'apellido') ?? '');
-        $nombreCompleto = ($apellidoVal !== '' && stripos($nombreVal, $apellidoVal) === false)
-            ? trim($nombreVal . ' ' . $apellidoVal)
-            : $nombreVal;
 
         return [
             'cedula'         => (string)(self::findValue($row, $schema, 'cedula') ?? 'Sin Cédula'),
-            'nombre'         => $nombreCompleto !== '' ? $nombreCompleto : 'Sin Nombre',
+            'nombre'         => $nombreVal !== '' ? $nombreVal : 'Sin Nombre',
+            'apellido'       => $apellidoVal !== '' ? $apellidoVal : null,
             'email'          => self::findValue($row, $schema, 'email'),
-            'materia'        => (string)(self::findValue($row, $schema, 'materia') ?? ''),
-            'nota'           => self::findValue($row, $schema, 'nota', true),
+            'curso'          => (string)(self::findValue($row, $schema, 'curso') ?? ''),
+            'nro_horas'      => self::findValue($row, $schema, 'nro_horas', true),
             'total'          => self::findValue($row, $schema, 'total', true),
             'periodo'        => self::findValue($row, $schema, 'periodo'),
             'proceso'        => self::findValue($row, $schema, 'proceso'),
             'grupo_objetivo' => self::findValue($row, $schema, 'grupo_objetivo'),
             'modalidad'      => self::findValue($row, $schema, 'modalidad'),
+            'genero'         => self::findValue($row, $schema, 'genero'),
+            'tipo'           => self::findValue($row, $schema, 'tipo'),
+            'cargo'          => self::findValue($row, $schema, 'cargo'),
+            'provincia'      => self::findValue($row, $schema, 'provincia'),
             'fecha_inicio'   => self::findValue($row, $schema, 'fecha_inicio'),
             'fecha_fin'      => self::findValue($row, $schema, 'fecha_fin'),
             'aprueba'        => self::findValue($row, $schema, 'aprueba'),
-            'origen_tabla'   => $finalYear,
             'anio'           => (int)$finalYear,
         ];
     }
 
-    /**
-     * Abre el CSV como stream UTF-8 sin cargar el archivo entero en RAM.
-     *
-     * - UTF-8 (con o sin BOM): devuelve el archivo directo + offset post-BOM.
-     * - Otro encoding: convierte en chunks de 64 KB a php://temp (vuelca a
-     *   disco tras 2 MB, así archivos de 97 MB no saturan la RAM).
-     *
-     * @return array{0: resource, 1: int}  [stream, dataOffset]
-     */
     private static function openStreamUtf8(string $filePath): array
     {
         $raw = fopen($filePath, 'rb');
@@ -588,7 +736,6 @@ class CsvService
             throw new ValidationException('No se pudo abrir el archivo CSV.');
         }
 
-        // 64 KB son suficientes para detectar encoding y BOM con fiabilidad.
         $sample = (string) fread($raw, 65536);
         rewind($raw);
 
@@ -596,15 +743,12 @@ class CsvService
         $clean    = $hasBom ? substr($sample, 3) : $sample;
         $encoding = mb_detect_encoding($clean, 'UTF-8, ISO-8859-1, Windows-1252', true);
 
-        // UTF-8 (o no detectado): usar el archivo directamente, sin copias.
         if ($encoding === false || $encoding === 'UTF-8') {
             $offset = $hasBom ? 3 : 0;
             fseek($raw, $offset);
             return [$raw, $offset];
         }
 
-        // Otro encoding: convertir chunk a chunk a php://temp para no saturar RAM.
-        // maxmemory:2097152 → vuelca al sistema de archivos tras 2 MB.
         $temp = fopen('php://temp/maxmemory:2097152', 'r+');
         if ($temp === false) {
             fclose($raw);

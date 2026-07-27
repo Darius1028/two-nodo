@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace App\Service;
 
 use App\Core\EntityManagerProvider;
-use App\Dto\DocumentUploadDto;
+use App\dto\DocumentUploadDto;
 use App\Entity\AcademicRecord;
 use App\Exception\SystemException;
 use FPDF;
@@ -91,14 +91,11 @@ class InEFPDF extends FPDF
 }
 
 /**
- * Genera el PDF de expediente académico. Tiene dos usos DISTINTOS y
- * DELIBERADAMENTE SEPARADOS:
+ * Genera el PDF de expediente académico.
  *
- *  - generateRecord()     -> vista previa, se envía inline al navegador.
- *                            No toca el Repositorio Documental.
- *  - generateAndArchive() -> genera Y archiva (con firma) en el
- *                            Repositorio Documental institucional.
- *                            Requiere un access token de servicio.
+ *  - generateRecord() se conserva para renderizar la copia en el visor.
+ *  - generateAndArchive() es el flujo oficial disparado por “Generar PDF”:
+ *    genera y archiva el documento en el Repositorio Documental.
  */
 class PdfService
 {
@@ -137,7 +134,7 @@ class PdfService
 
         if ($startYear !== null && $endYear !== null) {
             $records = array_filter($records, static function ($r) use ($startYear, $endYear) {
-                $rYear = (int)($r['origen_tabla'] ?? 0);
+                $rYear = (int)($r['anio'] ?? 0);
                 return $rYear >= $startYear && $rYear <= $endYear;
             });
         }
@@ -149,14 +146,26 @@ class PdfService
 
         $recordsByYear = [];
         foreach ($records as $record) {
-            $year = $record['origen_tabla'] ?? date('Y');
+            $year = $record['anio'] ?? date('Y');
             $recordsByYear[$year][] = $record;
         }
         krsort($recordsByYear);
 
         $firstRecord = reset($records);
+
+        // Los registros nuevos guardan nombre y apellido por separado; los
+        // históricos traen el nombre completo en [nombre] y [apellido] nulo.
+        $nombreBase = trim((string)($firstRecord['nombre'] ?? ''));
+        $apellido   = trim((string)($firstRecord['apellido'] ?? ''));
+        if ($apellido !== '' && stripos($nombreBase, $apellido) === false) {
+            $nombreBase = trim($nombreBase . ' ' . $apellido);
+        }
+        if ($nombreBase === '') {
+            $nombreBase = 'Estudiante';
+        }
+
         $studentInfo = [
-            'nombre'  => $options['override_name']    ?? ($firstRecord['nombre']  ?? 'Estudiante'),
+            'nombre'  => $options['override_name']    ?? $nombreBase,
             'cedula'  => $cedula,
             'email'   => $options['override_email']   ?? ($firstRecord['email']   ?? 'No registrado'),
             'periodo' => $options['override_periodo'] ?? (($options['start_year'] ?? '') . ' - ' . ($options['end_year'] ?? '')),
@@ -182,7 +191,8 @@ class PdfService
         $qb = $em->createQueryBuilder()
             ->select('r')->from(AcademicRecord::class, 'r')
             ->where('r.cedula = :cedula')->setParameter('cedula', $cedula)
-            ->orderBy('r.origen_tabla', 'DESC')
+            ->andWhere("r.estado != 'X'")
+            ->orderBy('r.anio', 'DESC')
             ->addOrderBy('r.id', 'DESC');
         return array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
     }
@@ -272,19 +282,33 @@ class PdfService
     private function addQRCode(string $cedula): void
     {
         $verifyUrl = $this->getVerificationUrl($cedula);
-        $qrPath = sys_get_temp_dir() . '/qr_' . $cedula . '.png';
-        $url = 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' . urlencode($verifyUrl);
-        $context = stream_context_create(['http' => ['timeout' => 5]]);
-        $imageData = @file_get_contents($url, false, $context);
-        if ($imageData !== false) {
-            file_put_contents($qrPath, $imageData);
+
+        $cacheDir  = dirname(__DIR__, 2) . '/var/cache/qr';
+        $cacheFile = $cacheDir . '/qr_' . preg_replace('/[^0-9A-Za-z]/', '', $cedula) . '.png';
+        $ttl       = 86400 * 30; // 30 días
+
+        if (!file_exists($cacheFile) || (time() - filemtime($cacheFile)) > $ttl) {
+            if (!is_dir($cacheDir)) {
+                mkdir($cacheDir, 0775, true);
+            }
+            $url     = 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' . urlencode($verifyUrl);
+            $context = stream_context_create(['http' => ['timeout' => 8]]);
+
+            $imageData = false;
+            for ($attempt = 1; $attempt <= 3 && $imageData === false; $attempt++) {
+                $imageData = @file_get_contents($url, false, $context);
+            }
+
+            if ($imageData !== false) {
+                file_put_contents($cacheFile, $imageData);
+            }
         }
-        if (file_exists($qrPath)) {
+
+        if (file_exists($cacheFile)) {
             $currentY = $this->pdf->GetY();
-            $qrSize = 28;
-            $x = $this->pdf->GetPageWidth() - $qrSize - 15;
-            $this->pdf->Image($qrPath, $x, 80, $qrSize, $qrSize);
-            unlink($qrPath);
+            $qrSize   = 28;
+            $x        = $this->pdf->GetPageWidth() - $qrSize - 15;
+            $this->pdf->Image($cacheFile, $x, 80, $qrSize, $qrSize);
             $this->pdf->SetY($currentY);
         }
     }
@@ -405,7 +429,7 @@ class PdfService
 
     private function formatCellValue(string $key, mixed $val): string
     {
-        if (in_array($key, ['nota', 'total'], true) && $val !== '' && $val !== null) {
+        if (in_array($key, ['total'], true) && $val !== '' && $val !== null) {
             $val = number_format((float)$val, 2);
         } elseif ($key === 'created_at' && $val) {
             $val = date('d/m/Y', strtotime((string)$val));
@@ -426,7 +450,7 @@ class PdfService
             . 'a través de la Jefatura de Informática de la Escuela de la Función Judicial, '
             . 'es todo cuanto puedo certificar.';
         $w = $this->pdf->GetPageWidth() - 20;
-        $this->pdf->MultiCell($w, 5, mb_convert_encoding($texto, 'ISO-8859-1', 'UTF-8'), 0, 'J');
+        $this->pdf->MultiCell($w, 5, iconv('UTF-8', 'ISO-8859-1//TRANSLIT//IGNORE', $texto), 0, 'J');
         $this->pdf->Ln(15);
     }
 
@@ -435,7 +459,7 @@ class PdfService
         $nombreArchivo = sprintf(
             'record_academico_%s_%s.pdf',
             preg_replace('/[^0-9A-Za-z_-]/', '', $cedula),
-            date('Ymd_His')
+            date('Ymd')
         );
 
         $contenidoPdf = $this->pdf->Output('S');
@@ -451,12 +475,16 @@ class PdfService
             nombreArchivo: $nombreArchivo,
             accessToken: $accessToken,
             ipOrigen: $ipOrigen,
-            sistema: $options['sistema'] ?? 'SistemaRecordAcademico',
-            modulo: $options['modulo'] ?? 'ExpedienteAcademico',
-            requiereFirmado: $options['requiere_firmado'] ?? true,
-            requiereIndex: $options['requiere_index'] ?? true
+            tipo: $options['tipo'] ?? 'Nuevo',
+            sistema: $options['sistema'] ?? 'SISTEMA RECORD ACADEMICO',
+            modulo: $options['modulo'] ?? 'Record Academico',
+            requiereFirmado: $options['requiere_firmado'] ?? 'N',
+            requiereIndex: $options['requiere_index'] ?? 'N'
         );
 
-        return $repositorio->subirPdf($dto);
+        $response = $repositorio->subirPdf($dto);
+        $response['_nombreArchivo'] = $nombreArchivo;
+
+        return $response;
     }
 }

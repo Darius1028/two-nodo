@@ -1,19 +1,21 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/../vendor/autoload.php';
-$dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
-$dotenv->safeLoad();
-
-// Manejo global de errores -- ver src/Core/ErrorHandler.php
-\App\Core\ErrorHandler::register();
 
 use App\Core\EntityManagerProvider;
+use App\Core\ErrorHandler;
 use App\Core\RequestContext;
 use App\Entity\AcademicRecord;
 use App\Security\SecurityContext;
 use App\Service\ConfigService;
 use App\Service\CsvService;
 use App\Service\ErrorFinder;
+
+$dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
+$dotenv->safeLoad();
+
+// Manejo global de errores -- ver src/Core/ErrorHandler.php
+ErrorHandler::register();
 
 SecurityContext::ensureSession();
 SecurityContext::requireRole($_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO');
@@ -34,11 +36,14 @@ function e($v): string {
 
 $message = '';
 $messageType = '';
+$pendingJobId = 0; // > 0 cuando se acaba de encolar una importación en este request
 $config = ConfigService::get();
+
+const RECORD_ACTIVE_CONDITION = "r.estado != 'X'";
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verifyCsrf($_POST['csrf_token'] ?? null)) {
-        $message = 'Token CSRF inválido.';
+        $message = 'La sesión ha caducado. Por favor recarga la página e intenta de nuevo.';
         $messageType = 'error';
     } else {
         $action = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
@@ -46,44 +51,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'delete_year_db':
                 $year = (int)($_POST['delete_year'] ?? 0);
                 if ($year <= 0) { $message = 'Año inválido.'; $messageType = 'error'; break; }
-                // Un año con cientos de miles de registros (como el CSV de
-                // 94MB que se importó) agotaba la memoria: findBy() sin
-                // límite hidrataba TODOS los registros de una sola vez y
-                // Doctrine los mantenía a todos trackeados en el
-                // UnitOfWork hasta el flush() final. Se batchea de a 500 y
-                // se hace clear() entre lotes para soltar esa memoria. Al
-                // no usar offset, cada vuelta trae "los primeros 500 que
-                // queden" -- los ya borrados en el lote anterior no vuelven
-                // a aparecer, así que no hace falta paginar.
-                set_time_limit(0);
-                $em = EntityManagerProvider::get();
-                $conn = $em->getConnection();
-                $batchSize = 500;
-                $count = 0;
+                $conn = EntityManagerProvider::get()->getConnection();
+                $idPersona = SecurityContext::getCurrentUserId() ?? 0;
+                $ip       = mb_substr(trim(RequestContext::getClientIp()), 0, 45);
+                $equipo   = mb_substr(trim(RequestContext::getClientHostname()), 0, 50);
+                $fecha    = (new \DateTime())->format('Y-m-d H:i:s');
                 try {
-                    $conn->beginTransaction();
-                    while (true) {
-                        $batch = $em->getRepository(AcademicRecord::class)->findBy(
-                                ['origen_tabla' => (string)$year],
-                                null,
-                                $batchSize
-                        );
-                        if (empty($batch)) {
-                            break;
-                        }
-                        foreach ($batch as $r) {
-                            $em->remove($r);
-                        }
-                        $em->flush();
-                        $em->clear();
-                        $count += count($batch);
-                    }
-                    $conn->commit();
+                    $count = $conn->executeStatement(
+                            "UPDATE [Academico].[RecordAcademico]
+                            SET estado            = 'X',
+                                idPersonaModifica = :idPersona,
+                                fechaModifica     = :fecha,
+                                ipModifica        = :ip,
+                                equipoModifica    = :equipo,
+                                motivoModifica    = 'Eliminado'
+                          WHERE anio = :year
+                            AND estado      != 'X'",
+                            [
+                                    'idPersona' => $idPersona,
+                                    'fecha'     => $fecha,
+                                    'ip'        => $ip,
+                                    'equipo'    => $equipo,
+                                    'year'      => (int)$year,
+                            ]
+                    );
                     $message = "Se eliminaron $count registros del año $year.";
                     $messageType = 'success';
-                    CsvService::logHistory('Eliminación Masiva', "Se eliminaron $count registros del año $year.");
+                    CsvService::logHistory('Eliminación Masiva', "Se eliminaron $count registros del año $year (estado X).");
                 } catch (\Throwable $e) {
-                    if ($conn->isTransactionActive()) { $conn->rollBack(); }
                     $message = 'Error: ' . $e->getMessage();
                     $messageType = 'error';
                 }
@@ -97,19 +92,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 $year = (int)($_POST['import_year'] ?? date('Y'));
 
-                // ✅ CORRECCIÓN: Pasar explícitamente el usuario, IP y hostname
-                $result = CsvService::importCSV(
-                        $_FILES['csv_file']['tmp_name'],
-                        $year,
-                        SecurityContext::getCurrentUserId() ?? 0,
-                        RequestContext::getClientIp(),
-                        RequestContext::getClientHostname()
+                // Validación de encabezados y conteo de filas. No es
+                // instantánea con archivos grandes (recorre el CSV entero
+                // para contar líneas), pero sigue siendo órdenes de
+                // magnitud más rápida que la importación real -- no toca
+                // la base de datos, sólo lee el archivo. De paso, el total
+                // de filas sirve para mostrar el % de avance real.
+                $headerCheck = CsvService::validateCSV($_FILES['csv_file']['tmp_name']);
+                if (!$headerCheck['success']) {
+                    $message = 'Archivo inválido: ' . implode('; ', $headerCheck['errors']);
+                    $messageType = 'error';
+                    break;
+                }
+
+                // La importación real YA NO corre acá: se guarda el archivo
+                // en una ubicación persistente (compartida con el contenedor
+                // import-worker vía el mismo bind mount de var/) y se encola
+                // un trabajo en Academico.ImportJob. bin/import-worker.php
+                // lo procesa en segundo plano, fuera de este request HTTP --
+                // así una importación de 45 minutos no depende de que
+                // sobrevivan la VPN del usuario, su navegador, ni ningún
+                // timeout de nginx/PHP-FPM.
+                $uploadDir = __DIR__ . '/../var/import-uploads';
+                if (!is_dir($uploadDir)) {
+                    mkdir($uploadDir, 0775, true);
+                }
+                $rutaDestino = $uploadDir . '/' . uniqid('import_', true) . '.csv';
+
+                if (!move_uploaded_file($_FILES['csv_file']['tmp_name'], $rutaDestino)) {
+                    $message = 'No se pudo guardar el archivo subido.';
+                    $messageType = 'error';
+                    break;
+                }
+
+                $em = EntityManagerProvider::get();
+                $jobId = (int) $em->getConnection()->fetchOne(
+                        "INSERT INTO Academico.ImportJob
+                        (nombreArchivo, rutaArchivo, anio, filasTotal, idPersonaCrea, ipCrea, equipoCrea)
+                     OUTPUT INSERTED.id
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        [
+                                $_FILES['csv_file']['name'],
+                                $rutaDestino,
+                                $year,
+                                $headerCheck['rows'],
+                                SecurityContext::getCurrentUserId() ?? 0,
+                                RequestContext::getClientIp(),
+                                RequestContext::getClientHostname(),
+                        ]
                 );
 
-                $message = $result['success']
-                        ? 'Importación exitosa: ' . $result['imported'] . ' registros.'
-                        : 'Fallo: ' . implode('; ', $result['errors']);
-                $messageType = $result['success'] ? 'success' : 'error';
+                $message = "Importación encolada (trabajo #$jobId). Procesando en segundo plano...";
+                $messageType = 'success';
+                $pendingJobId = $jobId;
+                CsvService::logHistory('Importación CSV', "Trabajo #$jobId encolado para el año $year.");
                 break;
 
             case 'update_record':
@@ -119,15 +155,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $record = $em->getRepository(AcademicRecord::class)->find($id);
                 if (!$record) { $message = 'Registro no encontrado.'; $messageType = 'error'; break; }
                 $record->fill([
-                        'nombre'         => trim((string)($_POST['edit_nombre']  ?? '')),
-                        'email'          => trim((string)($_POST['edit_email']   ?? '')),
-                        'materia'        => trim((string)($_POST['edit_materia'] ?? '')),
-                        'nota'           => $_POST['edit_nota']  ?? null,
+                        'nombre'         => trim((string)($_POST['edit_nombre']   ?? '')),
+                        'apellido'       => trim((string)($_POST['edit_apellido'] ?? '')),
+                        'email'          => trim((string)($_POST['edit_email']    ?? '')),
+                        'curso'          => trim((string)($_POST['edit_curso']    ?? '')),
+                        'nro_horas'      => $_POST['edit_nro_horas'] ?? null,
                         'total'          => $_POST['edit_total'] ?? null,
                         'periodo'        => trim((string)($_POST['edit_periodo'] ?? '')),
                         'proceso'        => trim((string)($_POST['edit_proceso'] ?? '')),
                         'grupo_objetivo' => trim((string)($_POST['edit_grupo']   ?? '')),
                         'modalidad'      => trim((string)($_POST['edit_modalidad'] ?? '')),
+                        'genero'         => trim((string)($_POST['edit_genero']    ?? '')),
+                        'tipo'           => trim((string)($_POST['edit_tipo']      ?? '')),
+                        'cargo'          => trim((string)($_POST['edit_cargo']     ?? '')),
+                        'provincia'      => trim((string)($_POST['edit_provincia'] ?? '')),
                         'fecha_inicio'   => trim((string)($_POST['edit_inicio'] ?? '')),
                         'fecha_fin'      => trim((string)($_POST['edit_fin']    ?? '')),
                         'aprueba'        => trim((string)($_POST['edit_aprueba'] ?? '')),
@@ -149,10 +190,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'insert_record':
                 $cedula  = trim((string)($_POST['new_cedula']  ?? ''));
                 $nombre  = trim((string)($_POST['new_nombre']  ?? ''));
-                $materia = trim((string)($_POST['new_materia'] ?? ''));
+                $curso   = trim((string)($_POST['new_curso'] ?? ''));
                 $year    = (int)($_POST['new_anio'] ?? date('Y'));
-                if ($cedula === '' || $nombre === '' || $materia === '') {
-                    $message = 'Cédula, nombre y materia son obligatorios.';
+                if ($cedula === '' || $nombre === '' || $curso === '') {
+                    $message = 'Cédula, nombre y curso son obligatorios.';
                     $messageType = 'error';
                     break;
                 }
@@ -161,13 +202,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $record->fill([
                         'cedula'       => $cedula,
                         'nombre'       => $nombre,
-                        'materia'      => $materia,
+                        'apellido'     => trim((string)($_POST['new_apellido'] ?? '')),
+                        'curso'        => $curso,
                         'email'        => trim((string)($_POST['new_email']   ?? '')),
-                        'nota'         => $_POST['new_nota']  ?? null,
+                        'nro_horas'    => $_POST['new_nro_horas'] ?? null,
+                        'genero'       => trim((string)($_POST['new_genero']    ?? '')),
+                        'tipo'         => trim((string)($_POST['new_tipo']      ?? '')),
+                        'cargo'        => trim((string)($_POST['new_cargo']     ?? '')),
+                        'provincia'    => trim((string)($_POST['new_provincia'] ?? '')),
                         'total'        => $_POST['new_total'] ?? null,
                         'periodo'      => trim((string)($_POST['new_periodo'] ?? '')),
                         'anio'         => $year,
-                        'origen_tabla' => (string)$year,
                 ]);
 
                 $record->setAuditoriaCreacion(
@@ -191,11 +236,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $record = $em->getRepository(AcademicRecord::class)->find($id);
                 if (!$record) { $message = 'Registro no encontrado.'; $messageType = 'error'; break; }
                 $cedulaBorrada = $record->getCedula();
-                $em->remove($record);
+                $record->markAsDeleted(
+                        SecurityContext::getCurrentUserId() ?? 0,
+                        RequestContext::getClientIp(),
+                        RequestContext::getClientHostname()
+                );
                 $em->flush();
                 $message = "Registro de cédula $cedulaBorrada eliminado.";
                 $messageType = 'success';
-                CsvService::logHistory('Eliminación', "Registro #$id (cédula $cedulaBorrada) eliminado.");
+                CsvService::logHistory('Eliminación', "Registro #$id (cédula $cedulaBorrada) eliminado (estado X).");
                 break;
 
             case 'toggle_qr':
@@ -211,6 +260,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 if (!isset($_FILES['asset_file']) || $_FILES['asset_file']['error'] !== UPLOAD_ERR_OK) {
                     $message = 'Error en subida.'; $messageType = 'error'; break;
+                }
+                $finfo = new finfo(FILEINFO_MIME_TYPE);
+                $mime  = $finfo->file($_FILES['asset_file']['tmp_name']);
+                if (!in_array($mime, ['image/png', 'image/jpeg'], true)) {
+                    $message = 'Solo se permiten imágenes PNG o JPEG.';
+                    $messageType = 'error';
+                    break;
                 }
                 $targetDir = __DIR__ . '/assets/';
                 if (!is_dir($targetDir)) { mkdir($targetDir, 0755, true); }
@@ -257,28 +313,51 @@ $page    = max(1, (int)($_GET['page'] ?? 1));
 $perPage = 10;
 $offset  = ($page - 1) * $perPage;
 
-$allowed = ['cedula','nombre','email','materia','proceso','origen_tabla','grupo_objetivo','modalidad','nota','total','fecha_inicio','fecha_fin','aprueba'];
+$allowed = ['cedula','nombre','apellido','email','curso','materia','proceso','anio','grupo_objetivo','modalidad','nro_horas','genero','tipo','cargo','provincia','total','fecha_inicio','fecha_fin','aprueba'];
 $records = [];
 $totalRecords = 0;
 
+// Columnas numéricas: LIKE sobre un INT/DECIMAL obliga a SQL Server a
+// convertir la columna a texto en cada fila, anula el índice y con 200k+
+// registros se vuelve lentísimo. Para ellas se usa comparación exacta.
+$numericColumns = ['anio', 'nro_horas', 'total'];
+
 if ($searchTerm !== '' && in_array($searchColumn, $allowed, true)) {
-    $qb = $em->createQueryBuilder()
-            ->select('r')->from(AcademicRecord::class, 'r')
-            ->where("r.$searchColumn LIKE :termino")
-            ->setParameter('termino', '%' . $searchTerm . '%')
-            ->orderBy('r.origen_tabla', 'DESC')
-            ->addOrderBy('r.id', 'DESC');
-    $records = array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
-    $totalRecords = count($records);
+    $esNumerica = in_array($searchColumn, $numericColumns, true);
+
+    if ($esNumerica && !is_numeric($searchTerm)) {
+        // Búsqueda numérica con texto: no hay coincidencias posibles.
+        $records = [];
+        $totalRecords = 0;
+    } else {
+        $qb = $em->createQueryBuilder()
+                ->select('r')->from(AcademicRecord::class, 'r')
+                ->andWhere(RECORD_ACTIVE_CONDITION)
+                ->orderBy('r.anio', 'DESC')
+                ->addOrderBy('r.id', 'DESC');
+
+        if ($esNumerica) {
+            $qb->where("r.$searchColumn = :termino")
+                    ->setParameter('termino', $searchTerm + 0);
+        } else {
+            $qb->where("r.$searchColumn LIKE :termino")
+                    ->setParameter('termino', '%' . $searchTerm . '%');
+        }
+
+        $records = array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
+        $totalRecords = count($records);
+    }
 } else {
     $qb = $em->createQueryBuilder()
             ->select('r')->from(AcademicRecord::class, 'r')
-            ->orderBy('r.origen_tabla', 'DESC')
+            ->where(RECORD_ACTIVE_CONDITION)
+            ->orderBy('r.anio', 'DESC')
             ->addOrderBy('r.id', 'DESC')
             ->setMaxResults($perPage)
             ->setFirstResult($offset);
     $records = array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
-    $countQb = $em->createQueryBuilder()->select('COUNT(r.id)')->from(AcademicRecord::class, 'r');
+    $countQb = $em->createQueryBuilder()->select('COUNT(r.id)')->from(AcademicRecord::class, 'r')
+            ->where("r.estado != 'X'");
     $totalRecords = (int)$countQb->getQuery()->getSingleScalarResult();
 }
 $totalPages = $totalRecords > 0 ? (int)ceil($totalRecords / $perPage) : 1;
@@ -303,9 +382,9 @@ $csrf = csrfToken();
         .nav-tab.active { background: #003366; color: white; border-color: #003366; }
         .tab-content { display: none; background: white; border-radius: 0 6px 6px 6px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
         .tab-content.active { display: block; }
-        .form-group { margin-bottom: 12px; }
-        label { display: block; margin-bottom: 4px; font-weight: 500; font-size: 13px; }
-        input[type="text"], input[type="password"], input[type="number"], select { width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; }
+        .form-group { margin-bottom: 8px; } /* Menos espacio entre campos */
+        label { display: block; margin-bottom: 2px; font-weight: 500; font-size: 12px; } /* Letra un poco más chica */
+        input[type="text"], input[type="password"], input[type="number"], select { width: 100%; padding: 6px 8px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; } /* Inputs un poco más delgados */
         .btn { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; font-size: 14px; text-decoration: none; display: inline-block; }
         .btn-primary { background: #003366; color: white; }
         .btn-primary:hover { background: #002244; }
@@ -324,7 +403,16 @@ $csrf = csrfToken();
         .card { background: #f8f9fa; border-radius: 8px; padding: 20px; margin-bottom: 20px; border: 1px solid #e1e5eb; }
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center; }
         .modal.active { display: flex; }
-        .modal-content { background: white; padding: 25px; border-radius: 8px; max-width: 800px; width: 90%; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
+        .modal-content {
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            max-width: 800px;
+            width: 90%;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+            max-height: 90vh;      /* Limita la altura al 90% de la pantalla */
+            overflow-y: auto;      /* Agrega un scroll interno si es necesario */
+        }
         .modal-sm { max-width: 400px; text-align: center; }
         .builder-toolbar { background: #eef2f7; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 15px; align-items: center; }
         .sortable-item { display: flex; align-items: center; gap: 10px; padding: 12px; background: white; border: 1px solid #ddd; border-radius: 6px; margin-bottom: 8px; cursor: grab; }
@@ -338,6 +426,35 @@ $csrf = csrfToken();
         .pagination a, .pagination span { padding: 8px 14px; border: 1px solid #ddd; border-radius: 4px; text-decoration: none; color: #333; }
         .pagination .active { background: #003366; color: white; border-color: #003366; }
         .pagination span { background: transparent; border: none; color: #666; }
+
+        /* ===== Overlay de carga (importación CSV / procesos largos) ===== */
+        #loadingOverlay {
+            position: fixed; inset: 0; z-index: 9999;
+            background: rgba(15, 23, 42, 0.72);
+            display: none;
+            align-items: center; justify-content: center;
+            backdrop-filter: blur(2px);
+        }
+        #loadingOverlay.show { display: flex; }
+        .loading-box {
+            background: #fff; border-radius: 12px;
+            padding: 32px 40px; text-align: center;
+            box-shadow: 0 10px 40px rgba(0,0,0,.25);
+            max-width: 420px; width: 90%;
+        }
+        .loading-spinner {
+            width: 48px; height: 48px; margin: 0 auto 18px;
+            border: 5px solid #e2e8f0; border-top-color: #003366;
+            border-radius: 50%;
+            animation: loading-spin 0.9s linear infinite;
+        }
+        @keyframes loading-spin { to { transform: rotate(360deg); } }
+        .loading-title { font-size: 17px; font-weight: 700; color: #003366; margin-bottom: 8px; }
+        .loading-text  { font-size: 13px; color: #64748b; line-height: 1.5; }
+        .loading-file  { font-size: 13px; color: #334155; font-weight: 600; margin-top: 10px; word-break: break-all; }
+        @media (prefers-reduced-motion: reduce) {
+            .loading-spinner { animation-duration: 3s; }
+        }
     </style>
     <script>
         function searchRecords() {
@@ -364,6 +481,10 @@ $csrf = csrfToken();
             return false;
         }
         function executeDeleteYear() {
+            closeModal('deleteConfirmModal');
+            if (typeof window.mostrarCargaEliminacion === 'function') {
+                window.mostrarCargaEliminacion();
+            }
             document.getElementById('deleteYearForm').submit();
         }
         let pendingDeleteRecordFormId = null;
@@ -459,9 +580,14 @@ $csrf = csrfToken();
             document.getElementById('edit_id').value = record.id;
             document.getElementById('edit_cedula').value = record.cedula;
             document.getElementById('edit_nombre').value = record.nombre;
+            document.getElementById('edit_apellido').value = record.apellido || '';
             document.getElementById('edit_email').value = record.email || '';
-            document.getElementById('edit_materia').value = record.materia;
-            document.getElementById('edit_nota').value = record.nota ?? '';
+            document.getElementById('edit_curso').value = record.curso || record.materia || '';
+            document.getElementById('edit_nro_horas').value = record.nro_horas ?? '';
+            document.getElementById('edit_genero').value = record.genero || '';
+            document.getElementById('edit_tipo').value = record.tipo || '';
+            document.getElementById('edit_cargo').value = record.cargo || '';
+            document.getElementById('edit_provincia').value = record.provincia || '';
             document.getElementById('edit_total').value = record.total ?? '';
             document.getElementById('edit_periodo').value = record.periodo || '';
             document.getElementById('edit_proceso').value = record.proceso || '';
@@ -504,14 +630,19 @@ $csrf = csrfToken();
                 <select id="searchColumn">
                     <option value="cedula" <?= $searchColumn === 'cedula' ? 'selected' : '' ?>>Cédula</option>
                     <option value="nombre" <?= $searchColumn === 'nombre' ? 'selected' : '' ?>>Nombre Completo</option>
-                    <option value="origen_tabla" <?= $searchColumn === 'origen_tabla' ? 'selected' : '' ?>>Año de Expediente</option>
+                    <option value="anio" <?= $searchColumn === 'anio' ? 'selected' : '' ?>>Año</option>
                     <option value="email" <?= $searchColumn === 'email' ? 'selected' : '' ?>>Email</option>
-                    <option value="materia" <?= $searchColumn === 'materia' ? 'selected' : '' ?>>Materia / Curso</option>
+                    <option value="curso" <?= $searchColumn === 'curso' ? 'selected' : '' ?>>Curso</option>
+                    <option value="apellido" <?= $searchColumn === 'apellido' ? 'selected' : '' ?>>Apellido</option>
                     <option value="proceso" <?= $searchColumn === 'proceso' ? 'selected' : '' ?>>Proceso</option>
                     <option value="grupo_objetivo" <?= $searchColumn === 'grupo_objetivo' ? 'selected' : '' ?>>Grupo Objetivo</option>
                     <option value="modalidad" <?= $searchColumn === 'modalidad' ? 'selected' : '' ?>>Modalidad</option>
-                    <option value="nota" <?= $searchColumn === 'nota' ? 'selected' : '' ?>>Nota / Horas</option>
                     <option value="total" <?= $searchColumn === 'total' ? 'selected' : '' ?>>Total</option>
+                    <option value="nro_horas" <?= $searchColumn === 'nro_horas' ? 'selected' : '' ?>>Nro. de Horas</option>
+                    <option value="genero" <?= $searchColumn === 'genero' ? 'selected' : '' ?>>Género</option>
+                    <option value="tipo" <?= $searchColumn === 'tipo' ? 'selected' : '' ?>>Tipo</option>
+                    <option value="cargo" <?= $searchColumn === 'cargo' ? 'selected' : '' ?>>Cargo</option>
+                    <option value="provincia" <?= $searchColumn === 'provincia' ? 'selected' : '' ?>>Provincia</option>
                     <option value="fecha_inicio" <?= $searchColumn === 'fecha_inicio' ? 'selected' : '' ?>>Fecha de Inicio</option>
                     <option value="fecha_fin" <?= $searchColumn === 'fecha_fin' ? 'selected' : '' ?>>Fecha de Fin</option>
                     <option value="aprueba" <?= $searchColumn === 'aprueba' ? 'selected' : '' ?>>Aprueba (SI/NO)</option>
@@ -537,25 +668,27 @@ $csrf = csrfToken();
                 <thead>
                 <tr>
                     <th>Año</th>
-                    <th>Cédula</th><th>Nombre</th><th>Proceso</th><th>Materia</th><th>Grupo Obj.</th>
-                    <th>Modalidad</th><th>Inicio</th><th>Fin</th><th>Nota</th><th>Total</th><th>Aprueba</th><th>Acción</th>
+                    <th>Cédula</th><th>Nombre</th><th>Proceso</th><th>Curso</th><th>Grupo Obj.</th>
+                    <th>Modalidad</th><th>Horas</th><th>Cargo</th><th>Provincia</th><th>Inicio</th><th>Fin</th><th>Total</th><th>Aprueba</th><th>Acción</th>
                 </tr>
                 </thead>
                 <tbody>
                 <?php if (empty($records)): ?>
-                    <tr><td colspan="13" style="text-align:center;">No se encontraron registros.</td></tr>
+                    <tr><td colspan="15" style="text-align:center;">No se encontraron registros.</td></tr>
                 <?php else: foreach ($records as $r): ?>
                     <tr>
-                        <td><span class="badge-year"><?= e($r['origen_tabla'] ?? '') ?></span></td>
+                        <td><span class="badge-year"><?= e($r['anio'] ?? '') ?></span></td>
                         <td><?= e($r['cedula'] ?? '') ?></td>
-                        <td><strong><?= e($r['nombre'] ?? '') ?></strong></td>
+                        <td><strong><?= e(trim(($r['nombre'] ?? '') . ' ' . ($r['apellido'] ?? ''))) ?></strong></td>
                         <td><?= e($r['proceso'] ?? '') ?></td>
-                        <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;"><?= e($r['materia'] ?? '') ?></td>
+                        <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;"><?= e($r['curso'] ?? $r['materia'] ?? '') ?></td>
                         <td><?= e($r['grupo_objetivo'] ?? '') ?></td>
                         <td><?= e($r['modalidad'] ?? '') ?></td>
+                        <td><?= e($r['nro_horas'] ?? '') ?></td>
+                        <td><?= e($r['cargo'] ?? '') ?></td>
+                        <td><?= e($r['provincia'] ?? '') ?></td>
                         <td><?= e($r['fecha_inicio'] ?? '') ?></td>
                         <td><?= e($r['fecha_fin'] ?? '') ?></td>
-                        <td><?= e($r['nota'] ?? '') ?></td>
                         <td><?= e($r['total'] ?? '') ?></td>
                         <td><?= e($r['aprueba'] ?? '') ?></td>
                         <td>
@@ -615,7 +748,7 @@ $csrf = csrfToken();
         <div class="grid-2">
             <div class="card">
                 <h3>Cargar CSV</h3>
-                <form action="?tab=import" method="POST" enctype="multipart/form-data">
+                <form id="importCsvForm" action="?tab=import" method="POST" enctype="multipart/form-data">
                     <input type="hidden" name="action" value="import_csv">
                     <input type="hidden" name="csrf_token" value="<?= e($csrf) ?>">
                     <input type="hidden" name="import_year" value="<?= (int)date('Y') ?>">
@@ -623,7 +756,7 @@ $csrf = csrfToken();
                         <label for="csv_file">Archivo CSV</label>
                         <input type="file" id="csv_file" name="csv_file" accept=".csv" required>
                     </div>
-                    <button type="submit" class="btn btn-primary">Importar</button>
+                    <button type="submit" class="btn btn-primary" id="btnImportar">Importar</button>
                 </form>
             </div>
             <div class="card" style="border:1px solid #f5c6cb;background:#fff5f5;">
@@ -665,8 +798,8 @@ $csrf = csrfToken();
                     <input type="hidden" name="asset_type" value="letterhead">
                     <input type="hidden" name="csrf_token" value="<?= e($csrf) ?>">
                     <div class="form-group">
-                        <label>Membrete</label>
-                        <input type="file" name="asset_file" accept=".png" required>
+                        <label for="asset_letterhead">Membrete</label>
+                        <input type="file" id="asset_letterhead" name="asset_file" accept=".png" required>
                     </div>
                     <button type="submit" class="btn btn-primary btn-sm">Actualizar</button>
                 </form>
@@ -675,8 +808,8 @@ $csrf = csrfToken();
                     <input type="hidden" name="asset_type" value="signature">
                     <input type="hidden" name="csrf_token" value="<?= e($csrf) ?>">
                     <div class="form-group">
-                        <label>Firma</label>
-                        <input type="file" name="asset_file" accept=".png" required>
+                        <label for="asset_signature">Firma</label>
+                        <input type="file" id="asset_signature" name="asset_file" accept=".png" required>
                     </div>
                     <button type="submit" class="btn btn-primary btn-sm">Actualizar</button>
                 </form>
@@ -708,14 +841,20 @@ $csrf = csrfToken();
                 <label for="newColSelect" class="visually-hidden">Seleccionar columna</label>
                 <select id="newColSelect" style="max-width: 250px;">
                     <option value="cedula">Cédula</option>
+                    <option value="nombre">Nombre</option>
+                    <option value="apellido">Apellido</option>
                     <option value="proceso">Proceso</option>
-                    <option value="materia">Curso (Materia)</option>
+                    <option value="curso">Curso</option>
                     <option value="grupo_objetivo">Grupo Objetivo</option>
                     <option value="modalidad">Modalidad</option>
-                    <option value="nota">Nro. de Horas (Nota)</option>
+                    <option value="total">Total</option>
+                    <option value="nro_horas">Nro. de Horas</option>
+                    <option value="genero">Género</option>
+                    <option value="tipo">Tipo</option>
+                    <option value="cargo">Cargo</option>
+                    <option value="provincia">Provincia</option>
                     <option value="fecha_inicio">Fecha Inicio</option>
                     <option value="fecha_fin">Fecha Fin</option>
-                    <option value="total">Total</option>
                     <option value="aprueba">Aprueba</option>
                     <option value="periodo">Año (Periodo/Rango)</option>
                 </select>
@@ -767,14 +906,18 @@ $csrf = csrfToken();
                     <input type="text" id="edit_cedula" readonly style="background:#eee;">
                 </div>
                 <div class="form-group">
-                    <label for="edit_nombre">Nombre Completo</label>
+                    <label for="edit_nombre">Nombre</label>
                     <input type="text" name="edit_nombre" id="edit_nombre" required>
+                </div>
+                <div class="form-group">
+                    <label for="edit_apellido">Apellido(s)</label>
+                    <input type="text" name="edit_apellido" id="edit_apellido">
                 </div>
             </div>
 
             <div class="form-group">
-                <label for="edit_materia">Materia / Curso</label>
-                <input type="text" name="edit_materia" id="edit_materia" required>
+                <label for="edit_curso">Curso</label>
+                <input type="text" name="edit_curso" id="edit_curso" required>
             </div>
 
             <div class="grid-3">
@@ -809,12 +952,28 @@ $csrf = csrfToken();
 
             <div class="grid-3">
                 <div class="form-group">
-                    <label for="edit_nota">Nro. Horas (Nota)</label>
-                    <input type="number" name="edit_nota" id="edit_nota" step="0.01">
+                    <label for="edit_nro_horas">Nro. de Horas</label>
+                    <input type="number" name="edit_nro_horas" id="edit_nro_horas" step="1" min="0">
                 </div>
                 <div class="form-group">
-                    <label for="edit_total">Total Calificación</label>
-                    <input type="number" name="edit_total" id="edit_total" step="0.01">
+                    <label for="edit_genero">Género</label>
+                    <input type="text" name="edit_genero" id="edit_genero" maxlength="20">
+                </div>
+                <div class="form-group">
+                    <label for="edit_tipo">Tipo</label>
+                    <input type="text" name="edit_tipo" id="edit_tipo" maxlength="100">
+                </div>
+                <div class="form-group">
+                    <label for="edit_cargo">Cargo</label>
+                    <input type="text" name="edit_cargo" id="edit_cargo" maxlength="150">
+                </div>
+                <div class="form-group">
+                    <label for="edit_provincia">Provincia</label>
+                    <input type="text" name="edit_provincia" id="edit_provincia" maxlength="100">
+                </div>
+                <div class="form-group">
+                    <label for="edit_total">Total (0 - 100)</label>
+                    <input type="number" name="edit_total" id="edit_total" step="0.01" min="0" max="100">
                 </div>
                 <div class="form-group">
                     <label for="edit_periodo">Periodo (Año)</label>
@@ -880,20 +1039,40 @@ $csrf = csrfToken();
                 <input type="text" name="new_nombre" id="new_nombre" required>
             </div>
             <div class="form-group">
-                <label for="new_materia">Materia</label>
-                <input type="text" name="new_materia" id="new_materia" required>
+                <label for="new_apellido">Apellido(s)</label>
+                <input type="text" name="new_apellido" id="new_apellido">
+            </div>
+            <div class="form-group">
+                <label for="new_curso">Curso</label>
+                <input type="text" name="new_curso" id="new_curso" required>
             </div>
             <div class="form-group">
                 <label for="new_email">Email</label>
                 <input type="text" name="new_email" id="new_email">
             </div>
             <div class="form-group">
-                <label for="new_nota">Nota</label>
-                <input type="text" name="new_nota" id="new_nota">
+                <label for="new_nro_horas">Nro. de Horas</label>
+                <input type="number" name="new_nro_horas" id="new_nro_horas" step="1" min="0">
             </div>
             <div class="form-group">
-                <label for="new_total">Total</label>
-                <input type="text" name="new_total" id="new_total">
+                <label for="new_genero">Género</label>
+                <input type="text" name="new_genero" id="new_genero" maxlength="20">
+            </div>
+            <div class="form-group">
+                <label for="new_tipo">Tipo</label>
+                <input type="text" name="new_tipo" id="new_tipo" maxlength="100">
+            </div>
+            <div class="form-group">
+                <label for="new_cargo">Cargo</label>
+                <input type="text" name="new_cargo" id="new_cargo" maxlength="150">
+            </div>
+            <div class="form-group">
+                <label for="new_provincia">Provincia</label>
+                <input type="text" name="new_provincia" id="new_provincia" maxlength="100">
+            </div>
+            <div class="form-group">
+                <label for="new_total">Total (0 - 100)</label>
+                <input type="number" name="new_total" id="new_total" step="0.01" min="0" max="100">
             </div>
             <div class="form-group">
                 <label for="new_periodo">Periodo</label>
@@ -910,5 +1089,233 @@ $csrf = csrfToken();
         </form>
     </div>
 </div>
+
+<!-- Overlay de progreso: se muestra durante la validación y mientras
+     el worker de fondo procesa la importación. Hace polling a
+     api.php?action=import_status para mostrar el % real y desaparecerse
+     solo al terminar. -->
+<div id="loadingOverlay" role="alert" aria-live="assertive" aria-busy="true">
+    <div class="loading-box">
+        <div class="loading-spinner" id="loadingSpinner"></div>
+        <div id="progressBarWrap" style="display:none;margin-bottom:12px;">
+            <div style="background:#e2e8f0;border-radius:6px;height:10px;overflow:hidden;">
+                <div id="progressBar" style="height:100%;width:0%;background:#003366;transition:width .4s;border-radius:6px;"></div>
+            </div>
+            <div id="progressPct" style="font-size:12px;color:#64748b;margin-top:4px;text-align:right;">0%</div>
+        </div>
+        <div class="loading-title" id="loadingTitle">Procesando…</div>
+        <div class="loading-text"  id="loadingText">Por favor espere. No cierre ni actualice esta ventana.</div>
+        <div class="loading-file"  id="loadingFile"></div>
+    </div>
+</div>
+
+<script>
+    (function () {
+        const overlay  = document.getElementById('loadingOverlay');
+        const elTitle  = document.getElementById('loadingTitle');
+        const elText   = document.getElementById('loadingText');
+        const elFile   = document.getElementById('loadingFile');
+        const elBar    = document.getElementById('progressBar');
+        const elPct    = document.getElementById('progressPct');
+        const barWrap  = document.getElementById('progressBarWrap');
+        const spinner  = document.getElementById('loadingSpinner');
+
+        let pollTimer  = null;
+        let pollStartTime = null;
+        let lastProgressUpdate = null;
+        const MAX_POLL_DURATION = 2 * 60 * 60 * 1000; // 2 horas en ms
+        const STUCK_TIMEOUT = 10 * 60 * 1000; // 10 minutos sin progreso
+
+        function mostrarCarga(titulo, texto, archivo) {
+            elTitle.textContent = titulo;
+            elText.textContent  = texto;
+            elFile.textContent  = archivo || '';
+            barWrap.style.display = 'none';
+            elBar.style.width     = '0%';
+            elPct.textContent     = '0%';
+            spinner.style.display = 'block';
+            overlay.classList.add('show');
+            pollStartTime = Date.now();
+            lastProgressUpdate = Date.now();
+        }
+
+        function ocultarCarga() {
+            overlay.classList.remove('show');
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+            pollStartTime = null;
+            lastProgressUpdate = null;
+        }
+
+        function actualizarProgreso(procesadas, total) {
+            lastProgressUpdate = Date.now();
+
+            if (total > 0) {
+                const pct = Math.min(100, Math.round(procesadas / total * 100));
+                barWrap.style.display = 'block';
+                elBar.style.width     = pct + '%';
+                elPct.textContent     = pct + '%';
+                elTitle.textContent   = 'Importando… ' + pct + '%';
+                elFile.textContent    = procesadas.toLocaleString() + ' / ' + total.toLocaleString() + ' filas';
+            } else {
+                elTitle.textContent = 'Importando… ' + procesadas.toLocaleString() + ' filas procesadas';
+            }
+        }
+
+        function iniciarPolling(jobId) {
+            if (pollTimer) clearInterval(pollTimer);
+
+            mostrarCarga(
+                'Importando en segundo plano…',
+                'Puede navegar al panel y volver — el proceso continúa aunque cierre esta pestaña.',
+                'Calculando progreso…'
+            );
+
+            pollTimer = setInterval(async function () {
+                // Timeout máximo de polling
+                if (pollStartTime && (Date.now() - pollStartTime) > MAX_POLL_DURATION) {
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                    spinner.style.display = 'none';
+                    elTitle.textContent = '⚠ Tiempo de espera agotado';
+                    elText.textContent = 'La importación puede estar en progreso. Revise el estado en la pestaña "Bitácora" o contacte al administrador.';
+                    elFile.textContent = '';
+
+                    document.querySelector('.loading-box').insertAdjacentHTML(
+                        'beforeend',
+                        '<button onclick="document.getElementById(\'loadingOverlay\').classList.remove(\'show\')" ' +
+                        'style="margin-top:14px;padding:7px 20px;background:#003366;color:#fff;' +
+                        'border:none;border-radius:6px;cursor:pointer;font-size:14px;">Cerrar</button>'
+                    );
+                    return;
+                }
+
+                // Detectar job "stuck" (sin progreso en 10 minutos)
+                if (lastProgressUpdate && (Date.now() - lastProgressUpdate) > STUCK_TIMEOUT) {
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                    spinner.style.display = 'none';
+                    elTitle.textContent = '⚠ Importación detenida';
+                    elText.textContent = 'No hay progreso en los últimos 10 minutos. Puede haber un error en el servidor.';
+                    elFile.textContent = 'Contacte al administrador.';
+
+                    document.querySelector('.loading-box').insertAdjacentHTML(
+                        'beforeend',
+                        '<button onclick="document.getElementById(\'loadingOverlay\').classList.remove(\'show\')" ' +
+                        'style="margin-top:14px;padding:7px 20px;background:#003366;color:#fff;' +
+                        'border:none;border-radius:6px;cursor:pointer;font-size:14px;">Cerrar</button>'
+                    );
+                    return;
+                }
+
+                try {
+                    const resp = await fetch('api.php?action=import_status&job_id=' + jobId,
+                        { credentials: 'same-origin' });
+
+                    if (!resp.ok) return;
+
+                    const data = await resp.json();
+                    if (!data.success) return;
+
+                    const job = data.job;
+
+                    if (job.estado === 'PROCESANDO' || job.estado === 'PENDIENTE') {
+                        actualizarProgreso(
+                            parseInt(job.filasProcesadas) || 0,
+                            parseInt(job.filasTotal)      || 0
+                        );
+                        return;
+                    }
+
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                    spinner.style.display = 'none';
+
+                    if (job.estado === 'COMPLETADO') {
+                        barWrap.style.display = 'block';
+                        elBar.style.width     = '100%';
+                        elPct.textContent     = '100%';
+                        elTitle.textContent   = '✓ Importación completada';
+                        elText.textContent    = (parseInt(job.filasImportadas) || 0).toLocaleString() + ' registros importados.';
+                        elFile.textContent    = '';
+                        setTimeout(function () {
+                            ocultarCarga();
+                            window.location.reload();
+                        }, 2500);
+
+                    } else if (job.estado === 'ERROR') {
+                        elTitle.textContent = '✗ Error en la importación';
+                        elText.textContent  = job.mensajeError || 'Error desconocido.';
+                        elFile.textContent  = 'Puede cerrar este mensaje.';
+
+                        document.querySelector('.loading-box').insertAdjacentHTML(
+                            'beforeend',
+                            '<button onclick="document.getElementById(\'loadingOverlay\').classList.remove(\'show\')" ' +
+                            'style="margin-top:14px;padding:7px 20px;background:#003366;color:#fff;' +
+                            'border:none;border-radius:6px;cursor:pointer;font-size:14px;">Cerrar</button>'
+                        );
+                    }
+
+                } catch (error) {
+                    // Error de red, reintentar en el próximo tick
+                    console.warn('Error en polling:', error);
+                }
+            }, 3000);
+        }
+
+        // Envío del formulario
+        const formImport = document.getElementById('importCsvForm');
+        if (formImport) {
+            formImport.addEventListener('submit', function (e) {
+                const input = document.getElementById('csv_file');
+                if (!input || !input.files || input.files.length === 0) return;
+
+                const boton = document.getElementById('btnImportar');
+                if (boton) {
+                    if (boton.disabled) {
+                        e.preventDefault();
+                        return;
+                    }
+                    boton.disabled = true;
+                    boton.textContent = 'Validando…';
+                }
+
+                const f = input.files[0];
+                mostrarCarga(
+                    'Validando archivo…',
+                    'Comprobando encabezados y contando filas. Un momento…',
+                    f.name + ' (' + (f.size / 1048576).toFixed(1) + ' MB)'
+                );
+            });
+        }
+
+        // Borrado masivo
+        window.mostrarCargaEliminacion = function () {
+            mostrarCarga('Eliminando registros…', 'No cierre ni actualice esta ventana.', '');
+        };
+
+        // Prevenir overlay pegado por bfcache
+        window.addEventListener('pageshow', function (e) {
+            if (!e.persisted) return;
+            ocultarCarga();
+            const boton = document.getElementById('btnImportar');
+            if (boton) {
+                boton.disabled = false;
+                boton.textContent = 'Importar';
+            }
+        });
+
+        // Arranque: si PHP encoló un trabajo, arranca el polling
+        const JOB_ID_NUEVO = <?= (int)$pendingJobId ?>;
+        if (JOB_ID_NUEVO > 0) {
+            window.addEventListener('DOMContentLoaded', function () {
+                iniciarPolling(JOB_ID_NUEVO);
+            });
+        }
+    })();
+</script>
+
 </body>
 </html>

@@ -3,7 +3,7 @@ services:
     image: nginx:alpine
     container_name: academic_nginx
     ports:
-      - "8090:80"
+      - "8010:80"
     volumes:
       - ./public:/var/www/html/public:ro
       - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
@@ -20,21 +20,19 @@ services:
       dockerfile: docker/Dockerfile
     container_name: academic_php
     command: >-
-      sh -c "mkdir -p /var/www/html/var/cache /var/www/html/var/log
-      && chown -R www-data:www-data /var/www/html/var
-      && chmod -R ug+rwX /var/www/html/var
-      && exec php-fpm"
+      sh -c "mkdir -p /var/www/html/var/cache /var/www/html/var/log && 
+      chown -R www-data:www-data /var/www/html/var && 
+      chmod -R ug+rwX /var/www/html/var && 
+      chown -R www-data:www-data /var/www/html/config && 
+      chmod -R ug+rwX /var/www/html/config && 
+      exec php-fpm"
     volumes:
       # Código fuente
       - .:/var/www/html
-
       # Vendor (este SÍ puede ser volumen de Docker, no se pierde)
       - vendor_data:/var/www/html/vendor
-
-      # ✅ CAMBIO IMPORTANTE: Bind mount local para var (logs y cache)
-      # Así historial.json queda en tu disco C: y nunca se borrará.
+      # Bind mount local para var (logs y cache)
       - ./var:/var/www/html/var
-
     env_file:
       - .env
     extra_hosts:
@@ -43,6 +41,31 @@ services:
     restart: unless-stopped
     networks:
       - app-network
+
+  import-worker:
+    image: academic-php:8.2-dev
+    container_name: academic_import_worker
+    # NOTA: Se eliminó el bloque 'build' para evitar que Docker intente
+    # construir y etiquetar la misma imagen dos veces en paralelo.
+    command: >-
+      sh -c "mkdir -p /var/www/html/var/cache /var/www/html/var/log /var/www/html/var/import-uploads &&
+      chown -R www-data:www-data /var/www/html/var &&
+      chmod -R ug+rwX /var/www/html/var &&
+      exec php bin/import-worker.php"
+    volumes:
+      - .:/var/www/html
+      - vendor_data:/var/www/html/vendor
+      - ./var:/var/www/html/var
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "auth.local:host-gateway"
+    restart: unless-stopped
+    networks:
+      - app-network
+    depends_on:
+      - php-app
 
 networks:
   app-network:

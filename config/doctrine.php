@@ -14,6 +14,11 @@ use Doctrine\DBAL\Types\Type;
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
 
+$appTimezone = trim((string) ($_ENV['APP_TIMEZONE'] ?? 'America/Guayaquil'));
+if (!date_default_timezone_set($appTimezone)) {
+    throw new \RuntimeException('APP_TIMEZONE no contiene una zona horaria válida.');
+}
+
 if (!Type::hasType(SqlServerDateTimeType::NAME)) {
     Type::addType(
         SqlServerDateTimeType::NAME,

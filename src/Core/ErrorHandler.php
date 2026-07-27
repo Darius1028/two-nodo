@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Core;
 
-use ErrorException;
+use App\Exception\SystemException;
 use Throwable;
 
 /**
@@ -32,9 +32,19 @@ final class ErrorHandler
         // pasen por el mismo manejador de abajo en vez de imprimirse solos.
         set_error_handler(static function (int $severity, string $message, string $file = '', int $line = 0): bool {
             if (!(error_reporting() & $severity)) {
-                return false; // silenciado con @ o por error_reporting()
+                return false;
             }
-            throw new ErrorException($message, 0, $severity, $file, $line);
+
+            // Incluir información de ubicación en el mensaje
+            $errorMessage = sprintf(
+                    'Error [%d]: %s en %s en la línea %d',
+                    $severity,
+                    $message,
+                    $file,
+                    $line
+            );
+
+            throw new SystemException($errorMessage, $severity);
         });
 
         set_exception_handler([self::class, 'handle']);

@@ -6,14 +6,17 @@ namespace App\Core;
 
 use App\Entity\AcademicRecord;
 use App\Entity\AcademicRecordAudit;
+use App\Entity\AcademicDocument;
 use App\Service\AcademicRecordAuditService;
+use App\Service\AcademicDocumentAuditService;
 use Doctrine\ORM\Event\PostPersistEventArgs;
 use Doctrine\ORM\Event\PreRemoveEventArgs;
 use Doctrine\ORM\Event\PostUpdateEventArgs;
 use Doctrine\ORM\Events;
 
 /**
- * Registra automáticamente cada cambio de AcademicRecord en el esquema AcademicoAUD.
+ * Registra automáticamente cada cambio de AcademicRecord y AcademicDocument
+ * en el esquema AcademicoAUD.
  * La escritura se hace por DBAL para evitar reentrar al UnitOfWork durante
  * flush() y para compartir la misma transacción que la operación principal.
  */
@@ -44,14 +47,21 @@ class AuditListener
         PostPersistEventArgs|PostUpdateEventArgs|PreRemoveEventArgs $args,
         int $revisionType
     ): void {
-        if (!$entity instanceof AcademicRecord || $entity->getId() === null) {
+        if ($entity instanceof AcademicRecord && $entity->getId() !== null) {
+            AcademicRecordAuditService::register(
+                $entity,
+                $revisionType,
+                $args->getObjectManager()->getConnection()
+            );
             return;
         }
 
-        AcademicRecordAuditService::register(
-            $entity,
-            $revisionType,
-            $args->getObjectManager()->getConnection()
-        );
+        if ($entity instanceof AcademicDocument && $entity->getId() !== null) {
+            AcademicDocumentAuditService::register(
+                $entity,
+                $revisionType,
+                $args->getObjectManager()->getConnection()
+            );
+        }
     }
 }
