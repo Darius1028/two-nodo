@@ -308,7 +308,7 @@ class PdfService
             $currentY = $this->pdf->GetY();
             $qrSize   = 28;
             $x        = $this->pdf->GetPageWidth() - $qrSize - 15;
-            $this->pdf->Image($cacheFile, $x, 80, $qrSize, $qrSize);
+            $this->pdf->Image($cacheFile, $x, 79, $qrSize, $qrSize);
             $this->pdf->SetY($currentY);
         }
     }

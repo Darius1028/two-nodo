@@ -20,7 +20,7 @@ services:
       dockerfile: docker/Dockerfile
     container_name: academic_php
     command: >-
-      sh -c "mkdir -p /var/www/html/var/cache /var/www/html/var/log && 
+      sh -c "mkdir -p /var/www/html/var/cache /var/www/html/var/log /var/www/html/var/import-uploads && 
       chown -R www-data:www-data /var/www/html/var && 
       chmod -R ug+rwX /var/www/html/var && 
       chown -R www-data:www-data /var/www/html/config && 

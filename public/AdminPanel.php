@@ -337,10 +337,10 @@ if ($searchTerm !== '' && in_array($searchColumn, $allowed, true)) {
                 ->addOrderBy('r.id', 'DESC');
 
         if ($esNumerica) {
-            $qb->where("r.$searchColumn = :termino")
+            $qb->andWhere("r.$searchColumn = :termino")
                     ->setParameter('termino', $searchTerm + 0);
         } else {
-            $qb->where("r.$searchColumn LIKE :termino")
+            $qb->andWhere("r.$searchColumn LIKE :termino")
                     ->setParameter('termino', '%' . $searchTerm . '%');
         }
 
@@ -753,9 +753,11 @@ $csrf = csrfToken();
                     <input type="hidden" name="csrf_token" value="<?= e($csrf) ?>">
                     <input type="hidden" name="import_year" value="<?= (int)date('Y') ?>">
                     <div class="form-group">
-                        <label for="csv_file">Archivo CSV</label>
+                        <label for="csv_file">Archivo CSV (tamaño máximo: 128 MB)</label>
                         <input type="file" id="csv_file" name="csv_file" accept=".csv" required>
                     </div>
+                    <p style="font-size:12px;color:#64748b;margin-top:-4px;margin-bottom:12px;">Solo se pueden procesar archivos de hasta 128 MB.</p>
+                    <div id="csvSizeError" style="display:none;padding:10px 14px;border-radius:6px;background:#f8d7da;color:#721c24;border:1px solid #f5c6cb;margin-bottom:12px;font-size:13px;font-weight:500;"></div>
                     <button type="submit" class="btn btn-primary" id="btnImportar">Importar</button>
                 </form>
             </div>
@@ -1266,11 +1268,31 @@ $csrf = csrfToken();
         }
 
         // Envío del formulario
+        const MAX_CSV_SIZE = 128 * 1024 * 1024; // 128 MB
         const formImport = document.getElementById('importCsvForm');
+        const csvSizeError = document.getElementById('csvSizeError');
+
         if (formImport) {
             formImport.addEventListener('submit', function (e) {
                 const input = document.getElementById('csv_file');
                 if (!input || !input.files || input.files.length === 0) return;
+
+                const f = input.files[0];
+
+                if (f.size > MAX_CSV_SIZE) {
+                    e.preventDefault();
+                    const sizeMB = (f.size / 1048576).toFixed(1);
+                    csvSizeError.textContent = 'El archivo pesa ' + sizeMB + ' MB. El límite máximo es 128 MB. Divida el archivo e intente de nuevo.';
+                    csvSizeError.style.display = 'block';
+                    const boton = document.getElementById('btnImportar');
+                    if (boton) {
+                        boton.disabled = false;
+                        boton.textContent = 'Importar';
+                    }
+                    return;
+                } else {
+                    csvSizeError.style.display = 'none';
+                }
 
                 const boton = document.getElementById('btnImportar');
                 if (boton) {
@@ -1282,7 +1304,6 @@ $csrf = csrfToken();
                     boton.textContent = 'Validando…';
                 }
 
-                const f = input.files[0];
                 mostrarCarga(
                     'Validando archivo…',
                     'Comprobando encabezados y contando filas. Un momento…',
