@@ -731,9 +731,21 @@ class CsvService
 
     private static function openStreamUtf8(string $filePath): array
     {
-        $raw = fopen($filePath, 'rb');
-        if ($raw === false) {
-            throw new ValidationException('No se pudo abrir el archivo CSV.');
+        $maxRetries = 5;
+        $retryDelayMs = 500;
+
+        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+            $raw = fopen($filePath, 'rb');
+            if ($raw !== false) {
+                break;
+            }
+
+            if ($attempt === $maxRetries) {
+                throw new ValidationException('No se pudo abrir el archivo CSV.');
+            }
+
+            error_log('[CsvService] fopen falló (intento ' . $attempt . '/' . $maxRetries . '): ' . $filePath);
+            usleep($retryDelayMs * 1000);
         }
 
         $sample = (string) fread($raw, 65536);

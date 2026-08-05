@@ -274,12 +274,21 @@ function e($v): string {
                 </form>
             </div>
             <?php if (!empty($searchCedula) && !empty($records)):
-                $first = reset($records); ?>
+                $first = reset($records);
+                $nombreBase = trim((string)($first['nombre'] ?? ''));
+                $apellido   = trim((string)($first['apellido'] ?? ''));
+                if ($apellido !== '' && stripos($nombreBase, $apellido) === false) {
+                    $nombreBase = trim($nombreBase . ' ' . $apellido);
+                }
+                if ($nombreBase === '') {
+                    $nombreBase = 'Estudiante';
+                }
+                ?>
                 <div class="card">
                     <h3>Verificación y Edición de Cabecera</h3>
                     <div class="form-group">
                         <label for="override_nombre">Nombre Completo</label>
-                        <input type="text" id="override_nombre" value="<?= e($first['nombre'] ?? '') ?>">
+                        <input type="text" id="override_nombre" value="<?= e($nombreBase) ?>">
                     </div>
                     <div class="form-group">
                         <label for="override_cedula">Cédula</label>
