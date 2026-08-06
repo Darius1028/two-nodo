@@ -117,7 +117,53 @@ class PdfService
     public function generateRecord(string $cedula, array $options = []): void
     {
         $this->buildPdf($cedula, $options);
-        $this->pdf->Output('I', 'record_academico_' . $cedula . '_' . date('Ymd') . '.pdf');
+        $filename = 'record_academico_' . $cedula . '_' . date('Ymd') . '.pdf';
+        $bytes = $this->outputPdfBytes();
+        if (!headers_sent()) {
+            header('Content-Type: application/pdf');
+            header('Content-Length: ' . strlen($bytes));
+            header('Content-Disposition: inline; filename="' . $filename . '"');
+            header('Cache-Control: private, max-age=0, must-revalidate');
+            header('Pragma: public');
+        }
+        echo $bytes;
+    }
+
+    /**
+     * Devuelve los bytes del PDF, firmados con PAdES si PADES_SIGN_ENABLED=true.
+     * La firma es una capa criptográfica añadida sobre el PDF ya generado
+     * (revisión incremental), por lo que membrete, firma gráfica y QR quedan
+     * intactos.
+     */
+    private function outputPdfBytes(): string
+    {
+        $bytes = $this->pdf->Output('S');
+        if (!is_string($bytes) || $bytes === '') {
+            throw new SystemException('FPDF no pudo generar el contenido del documento.');
+        }
+
+        if (!ConfigService::isPadesSignEnabled()) {
+            return $bytes;
+        }
+
+        $certPath = ConfigService::getPadesCertPath();
+        if ($certPath === '') {
+            throw new SystemException('PADES_SIGN_ENABLED=true pero PADES_CERT_PATH está vacío.');
+        }
+
+        $signer = new PadesSignerService(
+            $certPath,
+            ConfigService::getPadesCertPassword(),
+            ConfigService::getPadesSignerName(),
+            ConfigService::getPadesSignerReason(),
+            ConfigService::getPadesSignerLocation()
+        );
+
+        try {
+            return $signer->sign($bytes);
+        } catch (\Throwable $e) {
+            throw new SystemException('Fallo al firmar PDF (PAdES): ' . $e->getMessage(), 0, $e);
+        }
     }
 
     public function generateAndArchive(string $cedula, string $accessToken, string $ipOrigen, array $options = []): array
@@ -462,11 +508,7 @@ class PdfService
             date('Ymd')
         );
 
-        $contenidoPdf = $this->pdf->Output('S');
-
-        if (!is_string($contenidoPdf) || $contenidoPdf === '') {
-            throw new SystemException('FPDF no pudo generar el contenido del documento.');
-        }
+        $contenidoPdf = $this->outputPdfBytes();
 
         $repositorio = $this->repositorioDocumentalService ?? new RepositorioDocumentalService();
 
