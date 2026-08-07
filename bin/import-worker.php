@@ -218,8 +218,28 @@ function procesarJob(array $job): void
     };
 
     try {
+        $rutaArchivo = (string)($job['rutaArchivo'] ?? '');
+
+        if (!is_file($rutaArchivo) || !is_readable($rutaArchivo)) {
+            $detalle = !is_file($rutaArchivo)
+                ? 'el archivo no existe en la ruta guardada'
+                : 'el archivo existe pero no es legible';
+            $mensaje = sprintf(
+                'No se pudo abrir el archivo CSV: %s. Ruta: %s',
+                $detalle,
+                $rutaArchivo
+            );
+            fwrite(STDERR, sprintf(
+                "[import-worker] trabajo #%d falló: %s\n",
+                $jobId,
+                $mensaje
+            ));
+            marcarError($conn, $jobId, $mensaje);
+            return;
+        }
+
         $resultado = CsvService::importCSV(
-            $job['rutaArchivo'],
+            $rutaArchivo,
             (int)$job['anio'],
             (int)$job['idPersonaCrea'],
             (string)$job['ipCrea'],

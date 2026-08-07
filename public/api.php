@@ -31,6 +31,7 @@ define('YEAR_ID_REQUIRED', 'Year and ID parameters required');
 define('QUERY_CEDULA', 'r.cedula = :cedula');
 define('MSG_NOT_FOUND', 'Record not found');
 define('ACTIVE_RECORD_CONDITION', "r.estado != 'X'");
+define('NOT_AUTHENTICATED', "Not authenticated");
 
 $allowedOrigins = ['https://escuela.funcionjudicial.gob.ec'];
 if (isset($_SERVER['HTTP_ORIGIN']) && in_array($_SERVER['HTTP_ORIGIN'], $allowedOrigins, true)) {
@@ -74,7 +75,7 @@ $respond = static function (array $payload, int $status = 200): never {
 $requireAdminJson = static function () use ($respond): array {
     $user = SecurityContext::getCurrentUser();
     if ($user === null) {
-        $respond(['success' => false, 'error' => 'Not authenticated'], 401);
+        $respond(['success' => false, 'error' => NOT_AUTHENTICATED], 401);
     }
     $adminRole = $_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO';
     if (!SecurityContext::hasRole($adminRole)) {
@@ -111,7 +112,7 @@ $isPublic = in_array($action, PUBLIC_ACTIONS, true);
 if (!$isPublic) {
     $user = SecurityContext::getCurrentUser();
     if ($user === null) {
-        $respond(['success' => false, 'error' => 'Not authenticated'], 401);
+        $respond(['success' => false, 'error' => NOT_AUTHENTICATED], 401);
     }
 }
 
@@ -120,7 +121,7 @@ try {
         case 'me':
             $user = SecurityContext::getCurrentUser();
             if ($user === null) {
-                $respond(['success' => false, 'error' => 'Not authenticated'], 401);
+                $respond(['success' => false, 'error' => NOT_AUTHENTICATED], 401);
             }
             $respond(['success' => true, 'user' => [
                 'username' => $user['preferred_username'] ?? '',
@@ -393,6 +394,9 @@ try {
             if (!isset($_FILES['csv_file']) || $_FILES['csv_file']['error'] !== UPLOAD_ERR_OK) {
                 $respond(['success' => false, 'error' => 'CSV file required'], 400);
             }
+            if (!is_uploaded_file($_FILES['csv_file']['tmp_name'])) {
+                $respond(['success' => false, 'error' => 'Invalid upload'], 400);
+            }
             $respond(CsvService::importCSV(
                 $_FILES['csv_file']['tmp_name'],
                 $year,
@@ -409,6 +413,9 @@ try {
             }
             if (!isset($_FILES['csv_file']) || $_FILES['csv_file']['error'] !== UPLOAD_ERR_OK) {
                 $respond(['success' => false, 'error' => 'CSV file required'], 400);
+            }
+            if (!is_uploaded_file($_FILES['csv_file']['tmp_name'])) {
+                $respond(['success' => false, 'error' => 'Invalid upload'], 400);
             }
             $respond(CsvService::validateCSV($_FILES['csv_file']['tmp_name']));
             break;
@@ -432,6 +439,7 @@ try {
 
         case 'get_config':
             if (!RateLimiter::allow('api:' . RequestContext::getClientIp(), 120, 60)) {
+                RequestContext::alertForwardedHeaderSpoof('get_config');
                 $respond(['success' => false, 'error' => 'Demasiadas solicitudes.'], 429);
             }
             $config = ConfigService::get();
@@ -486,9 +494,11 @@ try {
                 $respond(['success' => false, 'error' => 'Cedula requerida'], 400);
             }
             if (!RateLimiter::allow('verify_certificate:' . RequestContext::getClientIp(), 15, 60)) {
+                RequestContext::alertForwardedHeaderSpoof('verify_certificate');
                 $respond(['success' => false, 'error' => 'Demasiadas solicitudes. Intentá nuevamente en un minuto.'], 429);
             }
             if (!RateLimiter::allow('api:' . RequestContext::getClientIp(), 120, 60)) {
+                RequestContext::alertForwardedHeaderSpoof('verify_certificate');
                 $respond(['success' => false, 'error' => 'Demasiadas solicitudes.'], 429);
             }
             $em = EntityManagerProvider::get();

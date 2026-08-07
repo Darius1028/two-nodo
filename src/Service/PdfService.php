@@ -331,22 +331,32 @@ class PdfService
 
         $cacheDir  = dirname(__DIR__, 2) . '/var/cache/qr';
         $cacheFile = $cacheDir . '/qr_' . preg_replace('/[^0-9A-Za-z]/', '', $cedula) . '.png';
-        $ttl       = 86400 * 30; // 30 días
+        $ttl       = 86400 * 30; // 30 dias
 
-        if (!file_exists($cacheFile) || (time() - filemtime($cacheFile)) > $ttl) {
+        $isValidCache = file_exists($cacheFile)
+            && (time() - filemtime($cacheFile)) <= $ttl
+            && $this->isValidPng($cacheFile);
+
+        if (!$isValidCache) {
             if (!is_dir($cacheDir)) {
-                mkdir($cacheDir, 0775, true);
-            }
-            $url     = 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' . urlencode($verifyUrl);
-            $context = stream_context_create(['http' => ['timeout' => 8]]);
-
-            $imageData = false;
-            for ($attempt = 1; $attempt <= 3 && $imageData === false; $attempt++) {
-                $imageData = @file_get_contents($url, false, $context);
+                @mkdir($cacheDir, 0775, true);
             }
 
-            if ($imageData !== false) {
-                file_put_contents($cacheFile, $imageData);
+            try {
+                $qrCode = new \chillerlan\QRCode\QRCode(
+                    new \chillerlan\QRCode\QROptions([
+                        'outputInterface' => \chillerlan\QRCode\Output\QRGdImagePNG::class,
+                        'scale'           => 5,
+                        'quietzoneSize'   => 1,
+                        'outputBase64'    => false,
+                    ])
+                );
+                $imageData = $qrCode->render($verifyUrl);
+                if (is_string($imageData) && $imageData !== '' && is_dir($cacheDir) && is_writable($cacheDir)) {
+                    file_put_contents($cacheFile, $imageData);
+                }
+            } catch (\Throwable $e) {
+                error_log('[PdfService] Error generando QR local: ' . $e->getMessage());
             }
         }
 
@@ -357,6 +367,17 @@ class PdfService
             $this->pdf->Image($cacheFile, $x, 79, $qrSize, $qrSize);
             $this->pdf->SetY($currentY);
         }
+    }
+
+    private function isValidPng(string $path): bool
+    {
+        $handle = fopen($path, 'rb');
+        if ($handle === false) {
+            return false;
+        }
+        $header = fread($handle, 8);
+        fclose($handle);
+        return $header === "\x89PNG\r\n\x1a\n";
     }
 
     private function getVerificationUrl(string $cedula): string

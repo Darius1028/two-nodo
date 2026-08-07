@@ -148,6 +148,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     break;
                 }
 
+                // Guardar la ruta canónica (realpath) en la BD: elimina el
+                // `/public/../var` y deja `/var/www/html/var/import-uploads/...`
+                // que es exactamente el mount compartido con el worker. Así el
+                // worker abre siempre la misma ruta que el panel.
+                $rutaCanonica = realpath($rutaDestino);
+                $rutaArchivoDb = $rutaCanonica !== false ? $rutaCanonica : $rutaDestino;
+
                 $em = EntityManagerProvider::get();
                 $jobId = (int) $em->getConnection()->fetchOne(
                         "INSERT INTO Academico.ImportJob
@@ -156,7 +163,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                      VALUES (?, ?, ?, ?, ?, ?, ?)",
                         [
                                 $_FILES['csv_file']['name'],
-                                $rutaDestino,
+                                $rutaArchivoDb,
                                 $year,
                                 $headerCheck['rows'],
                                 SecurityContext::getCurrentUserId() ?? 0,

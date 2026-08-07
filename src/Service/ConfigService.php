@@ -82,6 +82,11 @@ class ConfigService
         return __DIR__ . '/../../var/log/historial.json';
     }
 
+    public static function getSecurityAlertPath(): string
+    {
+        return __DIR__ . '/../../var/log/security_alerts.json';
+    }
+
     // --- PAdES / Firma digital PDF  ---
 
     public static function isPadesSignEnabled(): bool

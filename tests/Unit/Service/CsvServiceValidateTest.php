@@ -61,7 +61,12 @@ final class CsvServiceValidateTest extends TestCase
             'Cedula', 'Nombre', 'Apellido', 'Email', 'Genero',
             'Tipo', 'Cargo', 'Provincia', 'Total', 'Aprueba', 'Año',
         ];
-        $rowData = array_fill(0, count($headers), 'x');
+        $rowData = [
+            'Proceso Juridico', 'Curso A', 'Grupo 1', 'Presencial',
+            '40', '2024-01-10', '2024-02-10',
+            '1234567890', 'Juan', 'Perez', 'juan@example.com', 'M',
+            'Curso', 'Asistente', 'Pichincha', '95', 'SI', '2024',
+        ];
         $csv = implode(',', $headers) . "\n" . implode(',', $rowData) . "\n";
         $path = $this->makeTempCsv($csv);
 
@@ -72,6 +77,65 @@ final class CsvServiceValidateTest extends TestCase
                 . implode('; ', $result['errors'])
         );
         self::assertSame(1, $result['rows']);
+    }
+
+    public function testRejectsCsvWithHtmlTag(): void
+    {
+        $csv = $this->csvWithCell('<script>alert(1)</script>');
+        $result = CsvService::validateCSV($this->makeTempCsv($csv));
+        self::assertFalse($result['success']);
+        self::assertStringContainsString('peligroso', implode(' ', $result['errors']));
+    }
+
+    public function testRejectsCsvWithJavascriptUri(): void
+    {
+        $csv = $this->csvWithCell('javascript:alert(1)');
+        $result = CsvService::validateCSV($this->makeTempCsv($csv));
+        self::assertFalse($result['success']);
+        self::assertStringContainsString('peligroso', implode(' ', $result['errors']));
+    }
+
+    public function testRejectsCsvWithOnErrorHandler(): void
+    {
+        $csv = $this->csvWithCell('<img src=x onerror=alert(1)>');
+        $result = CsvService::validateCSV($this->makeTempCsv($csv));
+        self::assertFalse($result['success']);
+        self::assertStringContainsString('peligroso', implode(' ', $result['errors']));
+    }
+
+    public function testRejectsCsvWithCsvFormula(): void
+    {
+        $csv = $this->csvWithCell('=HYPERLINK("http://evil.com","click")');
+        $result = CsvService::validateCSV($this->makeTempCsv($csv));
+        self::assertFalse($result['success']);
+        self::assertStringContainsString('peligroso', implode(' ', $result['errors']));
+    }
+
+    public function testRejectsCsvWithNonNumericTotal(): void
+    {
+        $csv = $this->csvWithCell('noventa');
+        $result = CsvService::validateCSV($this->makeTempCsv($csv));
+        self::assertFalse($result['success']);
+        self::assertStringContainsString('numérico', implode(' ', $result['errors']));
+    }
+
+    private function csvWithCell(string $value): string
+    {
+        $headers = [
+            'Proceso', 'Curso', 'Grupo Objetivo', 'Modalidad',
+            'Nro. de Horas', 'Fecha Inicio', 'Facha Fin',
+            'Cedula', 'Nombre', 'Apellido', 'Email', 'Genero',
+            'Tipo', 'Cargo', 'Provincia', 'Total', 'Aprueba', 'Año',
+        ];
+        // Reemplaza la celda 'Total' (columna 16) con el valor sospechoso.
+        $row = [
+            'Proceso Juridico', 'Curso A', 'Grupo 1', 'Presencial',
+            '40', '2024-01-10', '2024-02-10',
+            '1234567890', 'Juan', 'Perez', 'juan@example.com', 'M',
+            'Curso', 'Asistente', 'Pichincha', '95', 'SI', '2024',
+        ];
+        $row[15] = $value;
+        return implode(',', $headers) . "\n" . implode(',', $row) . "\n";
     }
 
     public function testRejectsMalformedCsvWithSingleColumn(): void
