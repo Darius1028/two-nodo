@@ -514,6 +514,15 @@ try {
                 $respond(['success' => false, 'error' => 'not_found'], 404);
             }
 
+            // Nombre completo (nombre + apellido), igual que
+            // AcademicRecord::getNombreCompleto(): si el apellido ya viene
+            // incluido dentro del nombre, no se duplica.
+            $nombre = trim((string)($rows[0]['nombre'] ?? ''));
+            $apellido = trim((string)($rows[0]['apellido'] ?? ''));
+            $nombreCompleto = ($apellido === '' || stripos($nombre, $apellido) !== false)
+                ? $nombre
+                : trim($nombre . ' ' . $apellido);
+
             $historial = [];
             foreach ($rows as $r) {
                 $anio = !empty($r['anio']) ? (string)$r['anio'] : 'Histórico';
@@ -531,7 +540,7 @@ try {
             $respond([
                 'success' => true,
                 'cedula' => $cedula,
-                'nombre' => $rows[0]['nombre'],
+                'nombre' => $nombreCompleto,
                 'historial' => $historial,
             ]);
 
