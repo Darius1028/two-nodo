@@ -50,8 +50,21 @@ class ConfigService
         return self::get()['column_schema'] ?? [];
     }
 
+    private const ALLOWED_COLUMN_KEYS = [
+        'cedula', 'nombre', 'apellido', 'email', 'curso', 'materia',
+        'proceso', 'anio', 'grupo_objetivo', 'modalidad', 'nro_horas',
+        'genero', 'tipo', 'cargo', 'provincia', 'total',
+        'fecha_inicio', 'fecha_fin', 'aprueba', 'periodo',
+    ];
+
     public static function setColumnSchema(array $schema): bool
     {
+        foreach ($schema as $col) {
+            $key = $col['key'] ?? $col['field'] ?? '';
+            if ($key === '' || !in_array($key, self::ALLOWED_COLUMN_KEYS, true)) {
+                return false;
+            }
+        }
         $config = self::get();
         $config['column_schema'] = $schema;
         return self::set($config);
@@ -67,5 +80,46 @@ class ConfigService
     public static function getHistorialPath(): string
     {
         return __DIR__ . '/../../var/log/historial.json';
+    }
+
+    public static function getSecurityAlertPath(): string
+    {
+        return __DIR__ . '/../../var/log/security_alerts.json';
+    }
+
+    // --- PAdES / Firma digital PDF  ---
+
+    public static function isPadesSignEnabled(): bool
+    {
+        $raw = trim((string)($_ENV['PADES_SIGN_ENABLED'] ?? ''));
+        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+    }
+
+    public static function getPadesCertPath(): string
+    {
+        return trim((string)($_ENV['PADES_CERT_PATH'] ?? ''));
+    }
+
+    public static function getPadesCertPassword(): string
+    {
+        return (string)($_ENV['PADES_CERT_PASSWORD'] ?? '');
+    }
+
+    public static function getPadesSignerName(): string
+    {
+        $v = trim((string)($_ENV['PADES_SIGNER_NAME'] ?? ''));
+        return $v !== '' ? $v : 'Institución';
+    }
+
+    public static function getPadesSignerReason(): string
+    {
+        $v = trim((string)($_ENV['PADES_SIGNER_REASON'] ?? ''));
+        return $v !== '' ? $v : 'Certificación de documento oficial';
+    }
+
+    public static function getPadesSignerLocation(): string
+    {
+        $v = trim((string)($_ENV['PADES_SIGNER_LOCATION'] ?? ''));
+        return $v !== '' ? $v : 'Ecuador';
     }
 }

@@ -6,6 +6,7 @@ use App\Core\EntityManagerProvider;
 use App\Core\ErrorHandler;
 use App\Core\RequestContext;
 use App\Entity\AcademicRecord;
+use App\Security\RateLimiter;
 use App\Security\SecurityContext;
 use App\Service\ConfigService;
 use App\Service\CsvService;
@@ -34,6 +35,18 @@ function e($v): string {
     return htmlspecialchars((string)$v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
+/**
+ * Rate-limit para acciones administrativas del panel. Devuelve true si la
+ * acción puede continuar; false si excedió el umbral (en ese caso deja
+ * $message/$messageType listos para renderizar).
+ */
+function enforceAdminRateLimit(string $bucket, int $max = 5, int $window = 60): bool {
+    $userId = \App\Security\SecurityContext::getCurrentUserId() ?? 0;
+    $ip     = \App\Core\RequestContext::getClientIp();
+    $key    = 'admin_write:' . $bucket . ':' . $userId . ':' . $ip;
+    return RateLimiter::allow($key, $max, $window);
+}
+
 $message = '';
 $messageType = '';
 $pendingJobId = 0; // > 0 cuando se acaba de encolar una importación en este request
@@ -49,6 +62,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $action = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
         switch ($action) {
             case 'delete_year_db':
+                if (!enforceAdminRateLimit('delete_year_db', 2, 60)) {
+                    $message = 'Demasiadas eliminaciones masivas. Reintentá en un minuto.';
+                    $messageType = 'error';
+                    break;
+                }
                 $year = (int)($_POST['delete_year'] ?? 0);
                 if ($year <= 0) { $message = 'Año inválido.'; $messageType = 'error'; break; }
                 $conn = EntityManagerProvider::get()->getConnection();
@@ -85,6 +103,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
 
             case 'import_csv':
+                if (!enforceAdminRateLimit('import_csv', 2, 60)) {
+                    $message = 'Demasiadas importaciones en poco tiempo. Reintentá en un minuto.';
+                    $messageType = 'error';
+                    break;
+                }
                 if (!isset($_FILES['csv_file']) || $_FILES['csv_file']['error'] !== UPLOAD_ERR_OK) {
                     $message = 'Error en subida de archivo.';
                     $messageType = 'error';
@@ -125,6 +148,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     break;
                 }
 
+                // Guardar la ruta canónica (realpath) en la BD: elimina el
+                // `/public/../var` y deja `/var/www/html/var/import-uploads/...`
+                // que es exactamente el mount compartido con el worker. Así el
+                // worker abre siempre la misma ruta que el panel.
+                $rutaCanonica = realpath($rutaDestino);
+                $rutaArchivoDb = $rutaCanonica !== false ? $rutaCanonica : $rutaDestino;
+
                 $em = EntityManagerProvider::get();
                 $jobId = (int) $em->getConnection()->fetchOne(
                         "INSERT INTO Academico.ImportJob
@@ -133,7 +163,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                      VALUES (?, ?, ?, ?, ?, ?, ?)",
                         [
                                 $_FILES['csv_file']['name'],
-                                $rutaDestino,
+                                $rutaArchivoDb,
                                 $year,
                                 $headerCheck['rows'],
                                 SecurityContext::getCurrentUserId() ?? 0,
@@ -149,6 +179,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
 
             case 'update_record':
+                if (!enforceAdminRateLimit('update_record')) {
+                    $message = 'Demasiadas modificaciones en poco tiempo. Reintentá en un minuto.';
+                    $messageType = 'error';
+                    break;
+                }
                 $id = (int)($_POST['edit_id'] ?? 0);
                 if ($id <= 0) { $message = 'ID inválido.'; $messageType = 'error'; break; }
                 $em = EntityManagerProvider::get();
@@ -188,6 +223,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // primera versión migrada; en el original se hacía vía
             // api.php?action=insert_record).
             case 'insert_record':
+                if (!enforceAdminRateLimit('insert_record')) {
+                    $message = 'Demasiadas altas manuales en poco tiempo. Reintentá en un minuto.';
+                    $messageType = 'error';
+                    break;
+                }
                 $cedula  = trim((string)($_POST['new_cedula']  ?? ''));
                 $nombre  = trim((string)($_POST['new_nombre']  ?? ''));
                 $curso   = trim((string)($_POST['new_curso'] ?? ''));
@@ -230,6 +270,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // NUEVO: borrado de un registro individual (antes solo existía
             // borrado masivo por año).
             case 'delete_record':
+                if (!enforceAdminRateLimit('delete_record')) {
+                    $message = 'Demasiadas eliminaciones en poco tiempo. Reintentá en un minuto.';
+                    $messageType = 'error';
+                    break;
+                }
                 $id = (int)($_POST['delete_id'] ?? 0);
                 if ($id <= 0) { $message = 'ID inválido.'; $messageType = 'error'; break; }
                 $em = EntityManagerProvider::get();
@@ -248,12 +293,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
 
             case 'toggle_qr':
+                if (!enforceAdminRateLimit('toggle_qr')) {
+                    $message = 'Demasiados cambios de configuración en poco tiempo.';
+                    $messageType = 'error';
+                    break;
+                }
                 ConfigService::toggleQr();
                 $message = 'QR actualizado';
                 $messageType = 'success';
                 break;
 
             case 'upload_asset':
+                if (!enforceAdminRateLimit('upload_asset', 3, 60)) {
+                    $message = 'Demasiadas cargas de imagen en poco tiempo.';
+                    $messageType = 'error';
+                    break;
+                }
                 $assetType = is_string($_POST['asset_type'] ?? null) ? $_POST['asset_type'] : '';
                 if (!in_array($assetType, ['letterhead', 'signature'], true)) {
                     $message = 'Tipo no permitido.'; $messageType = 'error'; break;
@@ -261,22 +316,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!isset($_FILES['asset_file']) || $_FILES['asset_file']['error'] !== UPLOAD_ERR_OK) {
                     $message = 'Error en subida.'; $messageType = 'error'; break;
                 }
-                $finfo = new finfo(FILEINFO_MIME_TYPE);
-                $mime  = $finfo->file($_FILES['asset_file']['tmp_name']);
-                if (!in_array($mime, ['image/png', 'image/jpeg'], true)) {
-                    $message = 'Solo se permiten imágenes PNG o JPEG.';
-                    $messageType = 'error';
-                    break;
+                $tmpPath = $_FILES['asset_file']['tmp_name'];
+                $maxSize = 5 * 1024 * 1024;
+                if (filesize($tmpPath) > $maxSize) {
+                    $message = 'La imagen no debe superar 5 MB.'; $messageType = 'error'; break;
                 }
+                $ext = strtolower(pathinfo((string)($_FILES['asset_file']['name'] ?? ''), PATHINFO_EXTENSION));
+                if (!in_array($ext, ['png', 'jpg', 'jpeg'], true)) {
+                    $message = 'Solo se permiten archivos PNG o JPEG.'; $messageType = 'error'; break;
+                }
+                $finfo = new finfo(FILEINFO_MIME_TYPE);
+                $mime  = $finfo->file($tmpPath);
+                if (!in_array($mime, ['image/png', 'image/jpeg'], true)) {
+                    $message = 'El archivo no es una imagen válida.'; $messageType = 'error'; break;
+                }
+                $imgInfo = @getimagesize($tmpPath);
+                if ($imgInfo === false) {
+                    $message = 'No se pudo verificar la imagen.'; $messageType = 'error'; break;
+                }
+                $hash = hash_file('sha256', $tmpPath);
                 $targetDir = __DIR__ . '/assets/';
                 if (!is_dir($targetDir)) { mkdir($targetDir, 0755, true); }
                 $targetFile = $targetDir . ($assetType === 'letterhead' ? 'letterhead.png' : 'signature.png');
-                if (move_uploaded_file($_FILES['asset_file']['tmp_name'], $targetFile)) {
+                if (move_uploaded_file($tmpPath, $targetFile)) {
                     $cfg = ConfigService::get();
                     $cfg[$assetType . '_image'] = 'assets/' . basename($targetFile);
                     ConfigService::set($cfg);
                     $message = 'Imagen cargada.';
                     $messageType = 'success';
+                    CsvService::logHistory('Carga de Imagen', "Asset '$assetType' actualizado. SHA-256: $hash.");
                 } else {
                     $message = 'No se pudo mover el archivo.';
                     $messageType = 'error';
@@ -284,6 +352,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
 
             case 'save_schema':
+                if (!enforceAdminRateLimit('save_schema', 5, 60)) {
+                    $message = 'Demasiadas actualizaciones del esquema en poco tiempo. Reintentá en un minuto.';
+                    $messageType = 'error';
+                    break;
+                }
                 $schema = json_decode(is_string($_POST['schema_json'] ?? null) ? $_POST['schema_json'] : '[]', true);
                 if (is_array($schema) && ConfigService::setColumnSchema($schema)) {
                     $message = 'Esquema guardado.';

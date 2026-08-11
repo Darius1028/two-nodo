@@ -117,7 +117,53 @@ class PdfService
     public function generateRecord(string $cedula, array $options = []): void
     {
         $this->buildPdf($cedula, $options);
-        $this->pdf->Output('I', 'record_academico_' . $cedula . '_' . date('Ymd') . '.pdf');
+        $filename = 'record_academico_' . $cedula . '_' . date('Ymd') . '.pdf';
+        $bytes = $this->outputPdfBytes();
+        if (!headers_sent()) {
+            header('Content-Type: application/pdf');
+            header('Content-Length: ' . strlen($bytes));
+            header('Content-Disposition: inline; filename="' . $filename . '"');
+            header('Cache-Control: private, max-age=0, must-revalidate');
+            header('Pragma: public');
+        }
+        echo $bytes;
+    }
+
+    /**
+     * Devuelve los bytes del PDF, firmados con PAdES si PADES_SIGN_ENABLED=true.
+     * La firma es una capa criptográfica añadida sobre el PDF ya generado
+     * (revisión incremental), por lo que membrete, firma gráfica y QR quedan
+     * intactos.
+     */
+    private function outputPdfBytes(): string
+    {
+        $bytes = $this->pdf->Output('S');
+        if (!is_string($bytes) || $bytes === '') {
+            throw new SystemException('FPDF no pudo generar el contenido del documento.');
+        }
+
+        if (!ConfigService::isPadesSignEnabled()) {
+            return $bytes;
+        }
+
+        $certPath = ConfigService::getPadesCertPath();
+        if ($certPath === '') {
+            throw new SystemException('PADES_SIGN_ENABLED=true pero PADES_CERT_PATH está vacío.');
+        }
+
+        $signer = new PadesSignerService(
+            $certPath,
+            ConfigService::getPadesCertPassword(),
+            ConfigService::getPadesSignerName(),
+            ConfigService::getPadesSignerReason(),
+            ConfigService::getPadesSignerLocation()
+        );
+
+        try {
+            return $signer->sign($bytes);
+        } catch (\Throwable $e) {
+            throw new SystemException('Fallo al firmar PDF (PAdES): ' . $e->getMessage(), 0, $e);
+        }
     }
 
     public function generateAndArchive(string $cedula, string $accessToken, string $ipOrigen, array $options = []): array
@@ -285,22 +331,32 @@ class PdfService
 
         $cacheDir  = dirname(__DIR__, 2) . '/var/cache/qr';
         $cacheFile = $cacheDir . '/qr_' . preg_replace('/[^0-9A-Za-z]/', '', $cedula) . '.png';
-        $ttl       = 86400 * 30; // 30 días
+        $ttl       = 86400 * 30; // 30 dias
 
-        if (!file_exists($cacheFile) || (time() - filemtime($cacheFile)) > $ttl) {
+        $isValidCache = file_exists($cacheFile)
+            && (time() - filemtime($cacheFile)) <= $ttl
+            && $this->isValidPng($cacheFile);
+
+        if (!$isValidCache) {
             if (!is_dir($cacheDir)) {
-                mkdir($cacheDir, 0775, true);
-            }
-            $url     = 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=' . urlencode($verifyUrl);
-            $context = stream_context_create(['http' => ['timeout' => 8]]);
-
-            $imageData = false;
-            for ($attempt = 1; $attempt <= 3 && $imageData === false; $attempt++) {
-                $imageData = @file_get_contents($url, false, $context);
+                @mkdir($cacheDir, 0775, true);
             }
 
-            if ($imageData !== false) {
-                file_put_contents($cacheFile, $imageData);
+            try {
+                $qrCode = new \chillerlan\QRCode\QRCode(
+                    new \chillerlan\QRCode\QROptions([
+                        'outputInterface' => \chillerlan\QRCode\Output\QRGdImagePNG::class,
+                        'scale'           => 5,
+                        'quietzoneSize'   => 1,
+                        'outputBase64'    => false,
+                    ])
+                );
+                $imageData = $qrCode->render($verifyUrl);
+                if (is_string($imageData) && $imageData !== '' && is_dir($cacheDir) && is_writable($cacheDir)) {
+                    file_put_contents($cacheFile, $imageData);
+                }
+            } catch (\Throwable $e) {
+                error_log('[PdfService] Error generando QR local: ' . $e->getMessage());
             }
         }
 
@@ -311,6 +367,17 @@ class PdfService
             $this->pdf->Image($cacheFile, $x, 79, $qrSize, $qrSize);
             $this->pdf->SetY($currentY);
         }
+    }
+
+    private function isValidPng(string $path): bool
+    {
+        $handle = fopen($path, 'rb');
+        if ($handle === false) {
+            return false;
+        }
+        $header = fread($handle, 8);
+        fclose($handle);
+        return $header === "\x89PNG\r\n\x1a\n";
     }
 
     private function getVerificationUrl(string $cedula): string
@@ -462,11 +529,7 @@ class PdfService
             date('Ymd')
         );
 
-        $contenidoPdf = $this->pdf->Output('S');
-
-        if (!is_string($contenidoPdf) || $contenidoPdf === '') {
-            throw new SystemException('FPDF no pudo generar el contenido del documento.');
-        }
+        $contenidoPdf = $this->outputPdfBytes();
 
         $repositorio = $this->repositorioDocumentalService ?? new RepositorioDocumentalService();
 

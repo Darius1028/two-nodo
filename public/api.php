@@ -31,6 +31,7 @@ define('YEAR_ID_REQUIRED', 'Year and ID parameters required');
 define('QUERY_CEDULA', 'r.cedula = :cedula');
 define('MSG_NOT_FOUND', 'Record not found');
 define('ACTIVE_RECORD_CONDITION', "r.estado != 'X'");
+define('NOT_AUTHENTICATED', "Not authenticated");
 
 $allowedOrigins = ['https://escuela.funcionjudicial.gob.ec'];
 if (isset($_SERVER['HTTP_ORIGIN']) && in_array($_SERVER['HTTP_ORIGIN'], $allowedOrigins, true)) {
@@ -74,7 +75,7 @@ $respond = static function (array $payload, int $status = 200): never {
 $requireAdminJson = static function () use ($respond): array {
     $user = SecurityContext::getCurrentUser();
     if ($user === null) {
-        $respond(['success' => false, 'error' => 'Not authenticated'], 401);
+        $respond(['success' => false, 'error' => NOT_AUTHENTICATED], 401);
     }
     $adminRole = $_ENV['KEYCLOAK_ROLE_ADMIN'] ?? 'ADMIN_ACADEMICO';
     if (!SecurityContext::hasRole($adminRole)) {
@@ -83,12 +84,44 @@ $requireAdminJson = static function () use ($respond): array {
     return $user;
 };
 
+/**
+ * Rate-limit para endpoints de escritura administrativa. Complementa (no
+ * reemplaza) el rate-limit de WAF/Nginx. La clave combina acción + userId +
+ * IP para que un usuario comprometido en una IP no bloquee a otros usuarios.
+ *
+ * Umbrales por defecto: 5 escrituras por minuto. Los endpoints muy costosos
+ * (import_csv) usan un umbral más estricto.
+ */
+$enforceAdminRateLimit = static function (string $bucket, int $max = 5, int $window = 60) use ($respond): void {
+    $userId = SecurityContext::getCurrentUserId() ?? 0;
+    $ip     = RequestContext::getClientIp();
+    $key    = 'admin_write:' . $bucket . ':' . $userId . ':' . $ip;
+    if (!RateLimiter::allow($key, $max, $window)) {
+        $respond([
+            'success' => false,
+            'error'   => 'Demasiadas operaciones administrativas en poco tiempo. Reintentá en un minuto.',
+        ], 429);
+    }
+};
+
+/** Allow-list de endpoints públicos (solo lectura, sin autenticación). */
+const PUBLIC_ACTIONS = ['get_config', 'verify_certificate', 'get_years'];
+
+/** Cualquier acción no listada como pública requiere autenticación previa. */
+$isPublic = in_array($action, PUBLIC_ACTIONS, true);
+if (!$isPublic) {
+    $user = SecurityContext::getCurrentUser();
+    if ($user === null) {
+        $respond(['success' => false, 'error' => NOT_AUTHENTICATED], 401);
+    }
+}
+
 try {
     switch ($action) {
         case 'me':
             $user = SecurityContext::getCurrentUser();
             if ($user === null) {
-                $respond(['success' => false, 'error' => 'Not authenticated'], 401);
+                $respond(['success' => false, 'error' => NOT_AUTHENTICATED], 401);
             }
             $respond(['success' => true, 'user' => [
                 'username' => $user['preferred_username'] ?? '',
@@ -157,6 +190,7 @@ try {
 
         case 'insert_record':
             $requireAdminJson();
+            $enforceAdminRateLimit('insert_record');
             if ($method !== 'POST') {
                 $respond(['success' => false, 'error' => METHOD_NOT_ALLOWED], 405);
             }
@@ -206,6 +240,7 @@ try {
 
         case 'update_record':
             $requireAdminJson();
+            $enforceAdminRateLimit('update_record');
             if ($method !== 'PUT' && $method !== 'POST') {
                 $respond(['success' => false, 'error' => METHOD_NOT_ALLOWED], 405);
             }
@@ -257,6 +292,7 @@ try {
 
         case 'delete_record':
             $requireAdminJson();
+            $enforceAdminRateLimit('delete_record');
             if ($method !== 'DELETE' && $method !== 'POST') {
                 $respond(['success' => false, 'error' => METHOD_NOT_ALLOWED], 405);
             }
@@ -348,12 +384,18 @@ try {
 
         case 'import_csv':
             $requireAdminJson();
+            // import_csv es la operación más costosa (encola trabajo pesado
+            // sobre 200k+ registros). Rate-limit más estricto: 2/min por usuario.
+            $enforceAdminRateLimit('import_csv', 2, 60);
             if ($method !== 'POST') {
                 $respond(['success' => false, 'error' => METHOD_NOT_ALLOWED], 405);
             }
             $year = $getInt($_POST, 'year', $getInt($input, 'year', (int)date('Y')));
             if (!isset($_FILES['csv_file']) || $_FILES['csv_file']['error'] !== UPLOAD_ERR_OK) {
                 $respond(['success' => false, 'error' => 'CSV file required'], 400);
+            }
+            if (!is_uploaded_file($_FILES['csv_file']['tmp_name'])) {
+                $respond(['success' => false, 'error' => 'Invalid upload'], 400);
             }
             $respond(CsvService::importCSV(
                 $_FILES['csv_file']['tmp_name'],
@@ -371,6 +413,9 @@ try {
             }
             if (!isset($_FILES['csv_file']) || $_FILES['csv_file']['error'] !== UPLOAD_ERR_OK) {
                 $respond(['success' => false, 'error' => 'CSV file required'], 400);
+            }
+            if (!is_uploaded_file($_FILES['csv_file']['tmp_name'])) {
+                $respond(['success' => false, 'error' => 'Invalid upload'], 400);
             }
             $respond(CsvService::validateCSV($_FILES['csv_file']['tmp_name']));
             break;
@@ -393,9 +438,19 @@ try {
             break;
 
         case 'get_config':
+            if (!RateLimiter::allow('api:' . RequestContext::getClientIp(), 120, 60)) {
+                RequestContext::alertForwardedHeaderSpoof('get_config');
+                $respond(['success' => false, 'error' => 'Demasiadas solicitudes.'], 429);
+            }
             $config = ConfigService::get();
-            unset($config['admin_code']);
-            $respond(['success' => true, 'config' => $config]);
+            $safeKeys = ['qr_enabled', 'qr_base_url'];
+            $publicConfig = [];
+            foreach ($safeKeys as $key) {
+                if (array_key_exists($key, $config)) {
+                    $publicConfig[$key] = $config[$key];
+                }
+            }
+            $respond(['success' => true, 'config' => $publicConfig]);
             break;
 
         case 'get_history':
@@ -439,9 +494,11 @@ try {
                 $respond(['success' => false, 'error' => 'Cedula requerida'], 400);
             }
             if (!RateLimiter::allow('verify_certificate:' . RequestContext::getClientIp(), 15, 60)) {
+                RequestContext::alertForwardedHeaderSpoof('verify_certificate');
                 $respond(['success' => false, 'error' => 'Demasiadas solicitudes. Intentá nuevamente en un minuto.'], 429);
             }
             if (!RateLimiter::allow('api:' . RequestContext::getClientIp(), 120, 60)) {
+                RequestContext::alertForwardedHeaderSpoof('verify_certificate');
                 $respond(['success' => false, 'error' => 'Demasiadas solicitudes.'], 429);
             }
             $em = EntityManagerProvider::get();
@@ -456,6 +513,15 @@ try {
             if (empty($rows)) {
                 $respond(['success' => false, 'error' => 'not_found'], 404);
             }
+
+            // Nombre completo (nombre + apellido), igual que
+            // AcademicRecord::getNombreCompleto(): si el apellido ya viene
+            // incluido dentro del nombre, no se duplica.
+            $nombre = trim((string)($rows[0]['nombre'] ?? ''));
+            $apellido = trim((string)($rows[0]['apellido'] ?? ''));
+            $nombreCompleto = ($apellido === '' || stripos($nombre, $apellido) !== false)
+                ? $nombre
+                : trim($nombre . ' ' . $apellido);
 
             $historial = [];
             foreach ($rows as $r) {
@@ -474,7 +540,7 @@ try {
             $respond([
                 'success' => true,
                 'cedula' => $cedula,
-                'nombre' => $rows[0]['nombre'],
+                'nombre' => $nombreCompleto,
                 'historial' => $historial,
             ]);
 
@@ -608,25 +674,6 @@ try {
             $respond([
                 'name' => 'Academic Record System API',
                 'version' => '2.1',
-                'endpoints' => [
-                    'GET /api.php?action=me' => 'Datos del usuario autenticado',
-                    'GET /api.php?action=search&cedula=12345678' => 'Buscar registros por cédula',
-                    'GET /api.php?action=get_record&id=1' => 'Obtener un registro por ID',
-                    'GET /api.php?action=list_records&year=2024&limit=50&offset=0' => 'Listar registros por año (paginado)',
-                    'POST /api.php?action=insert_record' => 'Crear registro (admin)',
-                    'PUT /api.php?action=update_record' => 'Actualizar registro (admin)',
-                    'DELETE /api.php?action=delete_record&id=1' => 'Eliminar registro (admin)',
-                    'GET /api.php?action=get_years' => 'Años disponibles',
-                    'GET /api.php?action=check_errors&year=2024&type=comma_emails' => 'Chequeo de errores (admin)',
-                    'GET /api.php?action=error_summary&year=2024' => 'Resumen de errores (admin)',
-                    'POST /api.php?action=import_csv' => 'Importar CSV (admin)',
-                    'POST /api.php?action=validate_csv' => 'Validar CSV (admin)',
-                    'GET /api.php?action=export_csv&year=2024' => 'Exportar CSV (admin)',
-                    'GET /api.php?action=get_config' => 'Configuración pública del sistema',
-                    'GET /api.php?action=get_history&limit=50' => 'Bitácora (admin)',
-                    'GET /api.php?action=generate_pdf&cedula=12345678' => 'Info previa a generar PDF',
-                    'GET /api.php?action=verify_certificate&cedula=12345678' => 'Verificación pública de certificado (sin login, para el QR)',
-                ],
             ]);
     }
 } catch (Throwable $e) {

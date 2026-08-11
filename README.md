@@ -13,6 +13,7 @@ Sistema web para la gestión, consulta y certificación de registros académicos
 - **Exportación CSV** — Descarga de registros por año o por cédula (excluye registros con `estado = 'X'`).
 - **Validación previa de CSV** — Endpoint `validate_csv` que reporta errores de columnas antes de importar.
 - **Generación de PDFs** — Certificados con membrete, firma y código QR verificable. Al pulsar "Generar PDF" el archivo se descarga automáticamente y se archiva en el Repositorio Documental en un solo paso.
+- **Firma digital PDF (PKCS#7 / adbe.pkcs7.detached)** — Al activar `PADES_SIGN_ENABLED=true` cada PDF generado incrusta una firma criptográfica detached en una revisión incremental (sin alterar membrete, firma gráfica ni QR). Cualquier modificación posterior invalida la firma. Los lectores PDF muestran el panel de firmas con el estado de verificación.
 - **Visor de PDF integrado** — Renderizado en `<canvas>` con PDF.js (alojado localmente, sin CDN); evita que el visor nativo del navegador exponga botones de descarga o envío a Google Drive.
 - **QR de verificación con caché local** — La imagen QR se genera una vez por cédula y se almacena en `var/cache/qr/` (TTL 30 días). Peticiones posteriores no hacen llamadas de red al servidor de QR externo.
 - **Generación y archivo documental en un solo paso** — Al generar el PDF se envía al servicio institucional, se guarda su UUID y se audita la operación.
@@ -39,6 +40,7 @@ Sistema web para la gestión, consulta y certificación de registros académicos
 | Base de datos de roles | Microsoft SQL Server (`PORTAL_APLICATIVOS_CJ`) |
 | Autenticación | Keycloak (OpenID Connect) |
 | Generación PDF | FPDF |
+| Firma digital PDF | OpenSSL (CMS/PKCS#7 detached) via `openssl_cms_sign` |
 | Visor PDF | PDF.js (alojado localmente) |
 | Servidor web | Nginx |
 | Runtime | PHP-FPM |
@@ -91,6 +93,7 @@ sistema-records/
 │       ├── AcademicRecordAuditService.php  # Escribe en AUD via DBAL (individual)
 │       ├── CsvService.php                  # Importación/exportación CSV en streaming
 │       ├── PdfService.php                  # Generación y archivo de PDFs
+│       ├── PadesSignerService.php          # Firma digital PDF (CMS detached, incremental update)
 │       ├── RepositorioDocumentalService.php # Cliente del Repositorio Documental
 │       ├── ErrorFinder.php                 # Detección de errores en datos
 │       ├── ConfigService.php               # Lectura de config.json y env
@@ -194,6 +197,30 @@ Los roles **no** vienen del token de Keycloak. Se consultan en una base instituc
 | Variable | Descripción |
 |---|---|
 | `REPOSITORIO_DOCUMENTAL_URL` | URL del endpoint para archivar documentos PDF |
+
+#### Firma digital PDF (opcional)
+
+Al activar la firma, cada PDF generado (tanto en descarga directa como en archivado al Repositorio Documental) se firma criptográficamente en una revisión incremental antes de entregarse. La configuración es exclusivamente por `.env`; no se lee de `config.json`.
+
+| Variable | Descripción | Ejemplo |
+|---|---|---|
+| `PADES_SIGN_ENABLED` | Activar firma (`true`/`false`). Si es `false` u omitida, no se firma. | `true` |
+| `PADES_CERT_PATH` | Ruta al certificado en formato PKCS#12 (`.p12` / `.pfx`) | `/var/secrets/dev.p12` |
+| `PADES_CERT_PASSWORD` | Contraseña del `.p12` | `changeit` |
+| `PADES_SIGNER_NAME` | Nombre del firmante (aparece en el panel de firmas del lector) | `Escuela de la Función Judicial` |
+| `PADES_SIGNER_REASON` | Motivo de la firma | `Certificación de expediente académico` |
+| `PADES_SIGNER_LOCATION` | Ubicación | `Quito, EC` |
+
+> El archivo `.p12` debe estar fuera del document root (`public/`) y con permisos restrictivos (`chmod 600`). Nunca commitearlo al repositorio.
+
+Para generar un certificado auto-firmado de pruebas:
+
+```bash
+sh tools/generate_dev_cert.sh
+# genera secrets/dev.p12; copia las líneas PADES_* que imprime al .env
+```
+
+Ver la sección [Firma digital PDF](#firma-digital-pdf) para detalles sobre alcance, verificación y limitaciones.
 
 ### 2. Configuración de la aplicación
 
@@ -329,6 +356,76 @@ Todos los INSERT/UPDATE/DELETE — incluido el import CSV masivo — registran q
 | Inserta vía JDBC SQL | `AcademicRecordAuditService` via DBAL |
 | `@RevisionEntity` / `REVINFO` | `RevisionInfo` / `AUD.REVINFO` |
 | Tabla `_AUD` read-only por ORM | `readOnly: true` en `#[ORM\Entity]` |
+
+---
+
+## Firma digital PDF
+
+La firma se implementa como una **revisión incremental** sobre el PDF ya generado por FPDF, sin tocar la estructura visual. La capa criptográfica (CMS/PKCS#7 detached) se añade en un objeto de firma con `SubFilter /adbe.pkcs7.detached` y se registra en el `AcroForm` del documento.
+
+### Flujo interno
+
+```
+PdfService::outputPdfBytes()
+        │
+        ├── FPDF Output('S')                        → bytes del PDF sin firmar
+        │
+        └── if PADES_SIGN_ENABLED:
+            PadesSignerService::sign($bytes)
+                │
+                ├── Lee .p12 (openssl_pkcs12_read)
+                ├── Parsea xref/trailer/Catalog originales
+                ├── Construye incremento con:
+                │     - Objeto Sig con placeholder /Contents (16384 hex) y /ByteRange
+                │     - Field /FT /Sig
+                │     - AcroForm /SigFlags 3
+                │     - Nuevo Catalog con /AcroForm
+                │     - Nuevo xref + trailer con /Prev
+                ├── Calcula /ByteRange real y lo patchea (in-place)
+                ├── openssl_cms_sign de los bytes cubiertos (DER, detached, binary)
+                └── Inserta el DER hex en /Contents
+```
+
+### Verificación
+
+Los lectores PDF (Adobe Reader, Foxit, etc.) muestran el panel de firmas con estado:
+- **Verde** — Firma criptográficamente válida y certificado de confianza (CA reconocida).
+- **Amarillo** — Firma válida pero identidad no verificada (típico con certificados auto-firmados o CAs no instaladas).
+- **Rojo** — Documento alterado tras la firma.
+
+Verificación programática (línea de comandos):
+
+```bash
+# Extraer /ByteRange y /Contents del PDF firmado, luego:
+openssl cms -verify -inform DER -in sig.der -content data.bin -binary -noverify
+```
+
+### Alcance y limitaciones
+
+Esta implementación es una **firma PDF PKCS#7** compatible con la especificación histórica de Adobe (`adbe.pkcs7.detached`). Es válida y verificable en cualquier lector PDF conforme al spec ISO 32000-1.
+
+No cumple estrictamente ETSI EN 319 142 (PAdES-B-B):
+- **Falta el atributo firmado `SigningCertificateV2`** — `openssl_cms_sign` no lo genera nativamente.
+- **Sin timestamp TSA** — no es PAdES-B-T. Para añadirlo se requiere un segundo incremental update con la respuesta de un servidor TSA sobre el hash de la firma.
+- **Sin información de validación embebida (LTV)** — la firma no es validable a largo plazo tras vencer o revocar el certificado.
+
+Si se requiere PAdES estricta, TSA o LTV, considerar:
+- **SetaPDF-Signer** (comercial, del mismo autor de FPDF) — soporte nativo de PAdES-B/T/LT/LTA.
+- Delegación a un servicio de firma institucional (DSS local, Firma-e, Uanataca, etc.).
+
+### Tests
+
+```bash
+# Todos los tests
+php vendor/phpunit/phpunit/phpunit
+
+# Solo firma
+php vendor/phpunit/phpunit/phpunit --filter PadesSignerServiceTest
+```
+
+`PadesSignerServiceTest` genera un `.p12` auto-firmado, firma un PDF mínimo y verifica: estructura del PDF resultante, coherencia de `/ByteRange`, presencia del OID CMS SignedData en `/Contents`, y verificación criptográfica real con `openssl_cms_verify`.
+
+En Windows los tests requieren un `openssl.cnf` accesible; se autodetecta en rutas comunes (XAMPP, Git for Windows) o vía `OPENSSL_CONF`. En Docker/Linux no hace falta configurarlo.
 
 ---
 
