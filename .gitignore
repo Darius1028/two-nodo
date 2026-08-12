@@ -4,6 +4,15 @@
 /.idea/
 /.vscode/
 *.log
-composer.lock
 .DS_Store
 Thumbs.db
+var/log/historial.json
+var/log/*.json
+/.phpunit.cache/
+/.phpunit.result.cache
+
+# Certificados de firma PAdES — nunca commitear material criptográfico
+/secrets/
+*.p12
+*.pfx
+*.key

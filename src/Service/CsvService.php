@@ -5,73 +5,105 @@ namespace App\Service;
 
 use App\Core\EntityManagerProvider;
 use App\Entity\AcademicRecord;
+use App\Exception\SystemException;
+use App\Exception\ValidationException;
+use App\Security\SecurityAlertService;
 use Throwable;
 
+/**
+ * Fachada pública del procesamiento de CSV: importación, validación,
+ * exportación e historial.
+ *
+ * La lógica pesada está delegada en:
+ *  - CsvRowMapper: mapeo de filas del CSV a parámetros de inserción.
+ *  - CsvContentInspector: encabezados, reglas de contenido y validación por
+ *    columna.
+ *  - CsvImportProcessor: inserción por lotes con auditoría.
+ */
 class CsvService
 {
-    public static function importCSV(string $filePath, int $fallbackYear): array
-    {
+    /** Tamaño máximo del archivo CSV a importar (bytes). */
+    public const MAX_FILE_SIZE = 128 * 1024 * 1024; // 128MB
+
+    /** Máximo de filas de datos permitidas por archivo. */
+    public const MAX_IMPORT_ROWS = 500000;
+
+    /** Nivel de severidad de las alertas de seguridad (escala 1-10). */
+    private const SECURITY_ALERT_LEVEL = 9;
+
+    public static function importCSV(
+        string $filePath,
+        int $fallbackYear,
+        int $idPersona = 0,
+        string $ip = '',
+        string $equipo = '',
+        ?callable $onProgress = null
+    ): array {
         $result = ['success' => false, 'imported' => 0, 'errors' => []];
         $em = EntityManagerProvider::get();
         $conn = $em->getConnection();
         $stream = null;
 
+        set_time_limit(0);
+
+        error_log('[CsvService] importCSV iniciado'
+            . ' | idPersona=' . $idPersona
+            . ' | ip="' . $ip . '"'
+            . ' | equipo="' . $equipo . '"');
+
         try {
-            if (!file_exists($filePath) || !is_readable($filePath)) {
-                throw new \RuntimeException('El archivo CSV no se puede leer.');
+            // Validar tamaño antes de procesar
+            if (filesize($filePath) > self::MAX_FILE_SIZE) {
+                throw new ValidationException('El archivo excede el tamaño máximo de 128MB');
             }
 
-            $content = (string)file_get_contents($filePath);
-            $content = self::normalizeEncoding($content);
+            // Una sola pasada sobre el archivo: la inspección de seguridad
+            // (contenido peligroso, validación por columna, límite de filas)
+            // se hace inline dentro del loop de importación. Así no se lee el
+            // CSV dos veces (leer 200k+ filas / 128MB duplicado era el cuello
+            // de botella). Si algo no pasa, se lanza excepción y el rollback
+            // de la transacción descarta los lotes ya insertados.
 
-            $stream = fopen('php://memory', 'r+');
-            if ($stream === false) {
-                throw new \RuntimeException('No se pudo abrir el stream en memoria.');
-            }
-            fwrite($stream, $content);
-            rewind($stream);
-
+            [$stream, $dataOffset] = self::openStreamUtf8($filePath);
             $separator = self::detectSeparator($stream);
-            rewind($stream);
+            fseek($stream, $dataOffset);
 
             $rawHeader = fgetcsv($stream, 10000, $separator);
             if (!$rawHeader || count($rawHeader) < 2) {
-                throw new \RuntimeException('Formato de CSV inválido.');
+                throw new ValidationException('Formato de CSV inválido.');
             }
-            $header = array_map([self::class, 'normalizeString'], $rawHeader);
-            $schema = ConfigService::getColumnSchema();
 
+            $headerErrors = CsvContentInspector::validateHeaderColumns($rawHeader);
+            if (!empty($headerErrors)) {
+                throw new ValidationException(
+                    "Las columnas del archivo no coinciden con el formato requerido:\n"
+                    . implode("\n", $headerErrors)
+                    . "\n\nColumnas esperadas, en este orden exacto: "
+                    . implode(', ', CsvContentInspector::expectedHeaders())
+                );
+            }
+
+            $header = array_map([CsvRowMapper::class, 'normalizeString'], $rawHeader);
+
+            CsvImportProcessor::toggleIndexes($conn, disable: true);
             $conn->beginTransaction();
-            $batchSize = 100;
-            $count = 0;
 
-            while (($data = fgetcsv($stream, 10000, $separator)) !== false) {
-                if (count($data) < count($header)) {
-                    $data = array_pad($data, count($header), '');
-                } elseif (count($data) > count($header)) {
-                    $data = array_slice($data, 0, count($header));
-                }
-                $row = array_combine($header, $data);
-                $cleanParams = self::buildInsertParams($row, $schema, $fallbackYear);
+            $count = CsvImportProcessor::processAndInsertRows(
+                $stream,
+                $separator,
+                $header,
+                $fallbackYear,
+                [$idPersona, $ip, $equipo],
+                $filePath,
+                $onProgress
+            );
 
-                $record = new AcademicRecord();
-                $record->fill($cleanParams);
-                $em->persist($record);
-                $count++;
-
-                if (($count % $batchSize) === 0) {
-                    $em->flush();
-                    $em->clear();
-                }
-            }
-
-            $em->flush();
             $conn->commit();
 
             $result['success'] = true;
             $result['imported'] = $count;
             self::logHistory('Importación CSV', "Se importaron $count registros.");
-        } catch (Throwable $e) {
+        } catch (\Throwable $e) {
             if ($conn->isTransactionActive()) {
                 $conn->rollBack();
             }
@@ -81,6 +113,16 @@ class CsvService
             if (is_resource($stream)) {
                 fclose($stream);
             }
+
+            try {
+                CsvImportProcessor::toggleIndexes($conn, disable: false);
+            } catch (\Throwable $e) {
+                error_log(
+                    '[CsvService] ALERTA: no se pudieron reconstruir los índices '
+                    . 'de Academico.RecordAcademico tras la importación: ' . $e->getMessage()
+                    . '. Ejecutar manualmente: ALTER INDEX ALL ON [Academico].[RecordAcademico] REBUILD;'
+                );
+            }
         }
         return $result;
     }
@@ -88,29 +130,43 @@ class CsvService
     public static function validateCSV(string $filePath): array
     {
         $result = ['success' => false, 'rows' => 0, 'errors' => []];
+
         if (!file_exists($filePath) || !is_readable($filePath)) {
             $result['errors'][] = 'No se puede leer el archivo.';
             return $result;
         }
-        $stream = fopen($filePath, 'r');
-        if ($stream === false) {
-            $result['errors'][] = 'No se pudo abrir el archivo.';
-            return $result;
+
+        // Inspección de contenido (seguridad) + validación por columna.
+        $scan = self::safeScanCsvFile($filePath);
+
+        if (!empty($scan['suspiciousRows'])) {
+            $result['errors'][] = 'El archivo contiene contenido potencialmente peligroso '
+                . '(etiquetas HTML, javascript:, onerror o fórmulas CSV) y fue bloqueado.';
+        } elseif ($scan['overflow']) {
+            $result['errors'][] = sprintf(
+                'El archivo supera el límite de %d filas permitidas.',
+                self::MAX_IMPORT_ROWS
+            );
+        } elseif (!empty($scan['validationErrors'])) {
+            $result['errors'] = array_merge(
+                ['El archivo tiene datos que no cumplen el esquema esperado:'],
+                array_slice($scan['validationErrors'], 0, 25)
+            );
+        } else {
+            $result['success'] = true;
+            $result['rows'] = $scan['rows'];
         }
-        $header = fgetcsv($stream, 10000, ',');
-        if (!$header || count($header) < 2) {
-            fclose($stream);
-            $result['errors'][] = 'Formato CSV inválido.';
-            return $result;
-        }
-        $rows = 0;
-        while (fgetcsv($stream, 10000, ',') !== false) {
-            $rows++;
-        }
-        fclose($stream);
-        $result['success'] = true;
-        $result['rows'] = $rows;
+
         return $result;
+    }
+
+    private static function safeScanCsvFile(string $filePath): array
+    {
+        try {
+            return CsvContentInspector::scanCsvFile($filePath);
+        } catch (\Throwable $e) {
+            return ['rows' => 0, 'overflow' => false, 'suspiciousRows' => [], 'validationErrors' => [$e->getMessage()]];
+        }
     }
 
     public static function exportCSV(int $year, string $outputPath, string $cedula = ''): array
@@ -120,14 +176,15 @@ class CsvService
             $em = EntityManagerProvider::get();
             $qb = $em->createQueryBuilder()
                 ->select('r')->from(AcademicRecord::class, 'r')
-                ->orderBy('r.origen_tabla', 'DESC')
+                ->orderBy('r.anio', 'DESC')
                 ->addOrderBy('r.id', 'DESC');
 
             if ($cedula !== '') {
                 $qb->where('r.cedula = :cedula')->setParameter('cedula', $cedula);
             } else {
-                $qb->where('r.origen_tabla = :year')->setParameter('year', (string)$year);
+                $qb->where('r.anio = :year')->setParameter('year', (int)$year);
             }
+            $qb->andWhere("r.estado != 'X'");
 
             $records = array_map(
                 static fn(AcademicRecord $r) => $r->toArray(),
@@ -147,7 +204,10 @@ class CsvService
             fwrite($fp, "\xEF\xBB\xBF");
             fputcsv($fp, array_keys($records[0]));
             foreach ($records as $rec) {
-                fputcsv($fp, array_map(static fn($v) => $v === null ? '' : (string)$v, $rec));
+                fputcsv($fp, array_map(
+                    static fn($v) => CsvContentInspector::escapeCsvCell($v === null ? '' : (string)$v),
+                    $rec
+                ));
             }
             fclose($fp);
 
@@ -174,135 +234,163 @@ class CsvService
 
     public static function logHistory(string $action, string $details): void
     {
-        $path = ConfigService::getHistorialPath();
-        $dir = dirname($path);
-        if (!is_dir($dir)) {
-            mkdir($dir, 0775, true);
+        try {
+            $path = ConfigService::getHistorialPath();
+            $dir = dirname($path);
+            if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+                throw new SystemException("No se pudo crear el directorio de historial: {$dir}");
+            }
+
+            $history = file_exists($path)
+                ? (json_decode((string)file_get_contents($path), true) ?? [])
+                : [];
+            if (!is_array($history)) {
+                $history = [];
+            }
+            array_unshift($history, [
+                'timestamp' => date('Y-m-d H:i:s'),
+                'action'    => $action,
+                'details'   => $details,
+            ]);
+            $history = array_slice($history, 0, 100);
+
+            $json = json_encode($history, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+            if (file_put_contents($path, $json, LOCK_EX) === false) {
+                throw new SystemException("No se pudo escribir el historial: {$path}");
+            }
+        } catch (\Throwable $e) {
+            error_log(sprintf('No se pudo registrar el historial (%s): %s', $action, $e->getMessage()));
         }
-        $history = file_exists($path)
-            ? (json_decode((string)file_get_contents($path), true) ?? [])
-            : [];
-        if (!is_array($history)) {
-            $history = [];
+    }
+
+    /**
+     * Registra una alerta de seguridad de nivel 9 para una importación con
+     * contenido sospechoso. Persiste hash del archivo, usuario, IP, equipo,
+     * nombre del archivo, conteo de filas y hallazgos.
+     */
+    public static function alertSuspiciousImport(
+        string $filePath,
+        int $idPersona,
+        string $ip,
+        string $equipo,
+        int $rows,
+        array $suspiciousRows
+    ): void {
+        $hash = '';
+        $archivo = '';
+        if (is_file($filePath)) {
+            $hash    = hash_file('sha256', $filePath);
+            $archivo = basename($filePath);
         }
-        array_unshift($history, [
-            'timestamp' => date('Y-m-d H:i:s'),
-            'action'    => $action,
-            'details'   => $details,
+        $hash = $hash !== false ? $hash : '';
+
+        SecurityAlertService::log(self::SECURITY_ALERT_LEVEL, 'csv_import_sospechoso', [
+            'hash'      => $hash,
+            'usuario'   => $idPersona,
+            'ip'        => $ip,
+            'equipo'    => $equipo,
+            'archivo'   => $archivo,
+            'filas'     => $rows,
+            'hallazgos' => array_slice($suspiciousRows, 0, 50),
         ]);
-        $history = array_slice($history, 0, 100);
-        file_put_contents($path, json_encode($history, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
 
-    private static function normalizeString(mixed $str): string
+    /**
+     * Abre el archivo CSV como stream, detectando y normalizando su
+     * codificación a UTF-8. Devuelve [stream, offset de datos].
+     */
+    public static function openStreamUtf8(string $filePath): array
     {
-        $str = mb_strtolower(trim((string)$str), 'UTF-8');
-        return strtr($str, ['á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ú' => 'u', 'ñ' => 'n']);
+        $raw = self::openRawStream($filePath);
+
+        $sample = (string) fread($raw, 65536);
+        rewind($raw);
+
+        $hasBom   = str_starts_with($sample, "\xEF\xBB\xBF");
+        $clean    = $hasBom ? substr($sample, 3) : $sample;
+        $encoding = mb_detect_encoding($clean, 'UTF-8, ISO-8859-1, Windows-1252', true);
+
+        if ($encoding === false || $encoding === 'UTF-8') {
+            $offset = $hasBom ? 3 : 0;
+            fseek($raw, $offset);
+            return [$raw, $offset];
+        }
+
+        return [self::convertStreamToUtf8($raw, $encoding, $hasBom), 0];
     }
 
-    private static function findValue(array $normalizedRow, array $schema, string $key, bool $isNumeric = false): mixed
+    /**
+     * Abre el archivo con reintentos. Lanza una excepción clara si no puede.
+     */
+    private static function openRawStream(string $filePath)
     {
-        $label = '';
-        foreach ($schema as $col) {
-            if (($col['key'] ?? $col['field'] ?? null) === $key) {
-                $label = self::normalizeString((string)($col['label'] ?? ''));
+        $maxRetries = 5;
+        $retryDelayMs = 500;
+
+        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+            $raw = @fopen($filePath, 'rb');
+            if ($raw !== false) {
+                return $raw;
+            }
+
+            error_log('[CsvService] fopen falló (intento ' . $attempt . '/' . $maxRetries . '): ' . $filePath);
+            usleep($retryDelayMs * 1000);
+        }
+
+        $reason = self::describeOpenFailure($filePath);
+        throw new ValidationException(
+            'No se pudo abrir el archivo CSV: ' . $reason . ' Ruta: ' . $filePath
+        );
+    }
+
+    /**
+     * Convierte el stream crudo a UTF-8 en un stream temporal.
+     */
+    private static function convertStreamToUtf8($raw, string $encoding, bool $hasBom)
+    {
+        $temp = fopen('php://temp/maxmemory:2097152', 'r+');
+        if ($temp === false) {
+            fclose($raw);
+            throw new ValidationException('No se pudo crear el stream temporal de conversión.');
+        }
+
+        if ($hasBom) {
+            fseek($raw, 3);
+        }
+
+        while (!feof($raw)) {
+            $chunk = fread($raw, 65536);
+            if ($chunk === false || $chunk === '') {
                 break;
             }
+            fwrite($temp, mb_convert_encoding($chunk, 'UTF-8', $encoding));
         }
-        $keyNorm = self::normalizeString($key);
-        $val = null;
-        if ($label !== '' && isset($normalizedRow[$label])) {
-            $val = $normalizedRow[$label];
-        } elseif (isset($normalizedRow[$keyNorm])) {
-            $val = $normalizedRow[$keyNorm];
-        } else {
-            $val = self::findByAlias($normalizedRow, $key, $keyNorm, $label);
-        }
-        if ($val === null || trim((string)$val) === '') {
-            return null;
-        }
-        $val = trim((string)$val);
-        if ($isNumeric) {
-            $val = str_replace(',', '.', $val);
-            $val = preg_replace('/[^0-9.\-]/', '', $val);
-            return $val === '' ? null : (float)$val;
-        }
-        return $val;
+        fclose($raw);
+        rewind($temp);
+
+        return $temp;
     }
 
-    private static function findByAlias(array $normalizedRow, string $key, string $keyNorm, string $label): ?string
-    {
-        $aliases = [
-            'nombre'         => ['nombres', 'nombre completo', 'alumno', 'estudiante'],
-            'apellido'       => ['apellidos', 'apellido paterno', 'apellido materno'],
-            'cedula'         => ['identificacion', 'dni', 'documento', 'c.i.', 'ci'],
-            'anio'           => ['ano', 'periodo', 'year', 'año'],
-            'nota'           => ['nro de horas', 'horas', 'calificacion', 'nota', 'puntaje'],
-            'total'          => ['total', 'suma', 'definitiva', 'calificacion total'],
-            'materia'        => ['curso', 'evento', 'capacitacion', 'tema'],
-            'fecha_inicio'   => ['inicio', 'desde', 'fecha de inicio'],
-            'fecha_fin'      => ['fin', 'hasta', 'fecha de fin'],
-            'grupo_objetivo' => ['grupo obj', 'grupo', 'dirigido a'],
-            'email'          => ['correo', 'e-mail', 'mail', 'correo electronico'],
-        ];
-        $searchTerms = isset($aliases[$key])
-            ? array_merge([$keyNorm, $label], $aliases[$key])
-            : [$keyNorm, $label];
-        $searchTerms = array_filter($searchTerms);
-        foreach ($normalizedRow as $rowKey => $rowVal) {
-            foreach ($searchTerms as $term) {
-                if ($term !== '' && strpos((string)$rowKey, (string)$term) !== false) {
-                    return (string)$rowVal;
-                }
-            }
-        }
-        return null;
-    }
-
-    private static function buildInsertParams(array $row, array $schema, int $fallbackYear): array
-    {
-        $csvYear = self::findValue($row, $schema, 'anio') ?? self::findValue($row, $schema, 'periodo');
-        $finalYear = !empty($csvYear) ? (string)$csvYear : (string)$fallbackYear;
-
-        $nombreVal   = (string)(self::findValue($row, $schema, 'nombre') ?? '');
-        $apellidoVal = (string)(self::findValue($row, $schema, 'apellido') ?? '');
-        $nombreCompleto = ($apellidoVal !== '' && stripos($nombreVal, $apellidoVal) === false)
-            ? trim($nombreVal . ' ' . $apellidoVal)
-            : $nombreVal;
-
-        return [
-            'cedula'         => (string)(self::findValue($row, $schema, 'cedula') ?? 'Sin Cédula'),
-            'nombre'         => $nombreCompleto !== '' ? $nombreCompleto : 'Sin Nombre',
-            'email'          => self::findValue($row, $schema, 'email'),
-            'materia'        => (string)(self::findValue($row, $schema, 'materia') ?? ''),
-            'nota'           => self::findValue($row, $schema, 'nota', true),
-            'total'          => self::findValue($row, $schema, 'total', true),
-            'periodo'        => self::findValue($row, $schema, 'periodo'),
-            'proceso'        => self::findValue($row, $schema, 'proceso'),
-            'grupo_objetivo' => self::findValue($row, $schema, 'grupo_objetivo'),
-            'modalidad'      => self::findValue($row, $schema, 'modalidad'),
-            'fecha_inicio'   => self::findValue($row, $schema, 'fecha_inicio'),
-            'fecha_fin'      => self::findValue($row, $schema, 'fecha_fin'),
-            'aprueba'        => self::findValue($row, $schema, 'aprueba'),
-            'origen_tabla'   => $finalYear,
-            'anio'           => (int)$finalYear,
-        ];
-    }
-
-    private static function normalizeEncoding(string $content): string
-    {
-        $encoding = mb_detect_encoding($content, 'UTF-8, ISO-8859-1, Windows-1252', true);
-        if ($encoding !== false && $encoding !== 'UTF-8') {
-            $content = mb_convert_encoding($content, 'UTF-8', $encoding);
-        } elseif ($encoding === false) {
-            $content = mb_convert_encoding($content, 'UTF-8', 'Windows-1252');
-        }
-        return (string)preg_replace('/^\xEF\xBB\xBF/', '', $content);
-    }
-
-    private static function detectSeparator($stream): string
+    public static function detectSeparator($stream): string
     {
         $line = fgets($stream);
         return ($line !== false && strpos($line, ';') !== false) ? ';' : ',';
+    }
+
+    /**
+     * Describe el motivo por el que no se pudo abrir un archivo, para dar un
+     * mensaje de error accionable (ruta inexistente vs. sin permisos vs.
+     * otro error de fopen).
+     */
+    private static function describeOpenFailure(string $filePath): string
+    {
+        if (!file_exists($filePath)) {
+            return 'El archivo no existe en la ruta indicada (posible problema de volumen compartido entre contenedores).';
+        }
+        if (!is_readable($filePath)) {
+            return 'El archivo existe pero no es legible (permisos del contenedor).';
+        }
+        $last = error_get_last();
+        return $last !== null ? ('Error de lectura: ' . $last['message']) : 'Error desconocido de lectura.';
     }
 }

@@ -1,8 +1,12 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/../vendor/autoload.php';
+use App\Core\ErrorHandler;
+use App\Security\SecurityContext;
+
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
 
-use App\Security\SecurityContext;
+// Manejo global de errores -- ver src/Core/ErrorHandler.php
+ErrorHandler::register();
 SecurityContext::handleCallback();

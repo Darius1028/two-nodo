@@ -3,7 +3,7 @@ services:
     image: nginx:alpine
     container_name: academic_nginx
     ports:
-      - "80:80"
+      - "8010:80"
     volumes:
       - ./public:/var/www/html/public:ro
       - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
@@ -14,26 +14,58 @@ services:
       - app-network
 
   php-app:
+    image: academic-php:8.2-dev
     build:
       context: .
       dockerfile: docker/Dockerfile
     container_name: academic_php
+    command: >-
+      sh -c "mkdir -p /var/www/html/var/cache /var/www/html/var/log /var/www/html/var/import-uploads && 
+      chown -R www-data:www-data /var/www/html/var && 
+      chmod -R ug+rwX /var/www/html/var && 
+      chown -R www-data:www-data /var/www/html/config && 
+      chmod -R ug+rwX /var/www/html/config && 
+      exec php-fpm"
     volumes:
+      # Código fuente
       - .:/var/www/html
-      # FIX: /vendor está en .gitignore y no existe en el host tras un clone
-      # limpio. Sin este volumen nombrado, el bind mount de arriba (".:/var/www/html")
-      # tapa el vendor/ instalado durante el build de la imagen y la app
-      # revienta con "vendor/autoload.php not found". Este volumen "gana" sobre
-      # el bind mount solo para esa subcarpeta, preservando lo instalado en la imagen.
+      # Vendor (este SÍ puede ser volumen de Docker, no se pierde)
       - vendor_data:/var/www/html/vendor
-      - var_data:/var/www/html/var
+      # Bind mount local para var (logs y cache)
+      - ./var:/var/www/html/var
     env_file:
       - .env
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "auth.local:host-gateway"
     restart: unless-stopped
     networks:
       - app-network
+
+  import-worker:
+    image: academic-php:8.2-dev
+    container_name: academic_import_worker
+    # NOTA: Se eliminó el bloque 'build' para evitar que Docker intente
+    # construir y etiquetar la misma imagen dos veces en paralelo.
+    command: >-
+      sh -c "mkdir -p /var/www/html/var/cache /var/www/html/var/log /var/www/html/var/import-uploads &&
+      chown -R www-data:www-data /var/www/html/var &&
+      chmod -R ug+rwX /var/www/html/var &&
+      exec php bin/import-worker.php"
+    volumes:
+      - .:/var/www/html
+      - vendor_data:/var/www/html/vendor
+      - ./var:/var/www/html/var
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "auth.local:host-gateway"
+    restart: unless-stopped
+    networks:
+      - app-network
+    depends_on:
+      - php-app
 
 networks:
   app-network:
@@ -41,4 +73,4 @@ networks:
 
 volumes:
   vendor_data:
-  var_data:
+  #  ELIMINADO: var_data (ya no lo necesitamos)

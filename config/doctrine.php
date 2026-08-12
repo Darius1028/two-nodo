@@ -7,10 +7,24 @@ use Doctrine\DBAL\DriverManager;
 use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\ORMSetup;
 use App\Core\AuditListener;
+use App\Doctrine\Type\SqlServerDateTimeType;
+use Doctrine\DBAL\Types\Type;
 
 // 1. Cargar variables de entorno
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
+
+$appTimezone = trim((string) ($_ENV['APP_TIMEZONE'] ?? 'America/Guayaquil'));
+if (!date_default_timezone_set($appTimezone)) {
+    throw new \RuntimeException('APP_TIMEZONE no contiene una zona horaria válida.');
+}
+
+if (!Type::hasType(SqlServerDateTimeType::NAME)) {
+    Type::addType(
+        SqlServerDateTimeType::NAME,
+        SqlServerDateTimeType::class
+    );
+}
 
 // 2. Configuración ORM
 $isDevMode = ($_ENV['APP_ENV'] ?? 'prod') !== 'prod';
@@ -38,27 +52,27 @@ $connectionParams = [
     'password' => $_ENV['DB_PASS'] ?? '',
     'charset'  => 'UTF-8',
     'driverOptions' => [
-        'Encrypt'                => false,
-        'TrustServerCertificate' => true,
-        'LoginTimeout'           => 30,
-        'CharacterSet'           => 'UTF-8',
+        // FIX: DB_ENCRYPT/DB_LOGIN_TIMEOUT estaban declaradas en .env.example
+        // pero nunca se leían -- quedaban siempre hardcodeadas sin importar
+        // el entorno, contradiciendo el README ("en producción configurar
+        // Encrypt=true").
+        'Encrypt'                => filter_var($_ENV['DB_ENCRYPT'] ?? 'false', FILTER_VALIDATE_BOOLEAN) ? 'yes' : 'no',
+        'TrustServerCertificate' => 'yes',
+        'LoginTimeout'           => (int)($_ENV['DB_LOGIN_TIMEOUT'] ?? 30),
     ],
 ];
 
 $connection = DriverManager::getConnection($connectionParams, $ormConfig);
+
+// Doctrine serializa DATETIME2 como Y-m-d H:i:s.u. Se fija el formato de
+// la sesión para que SQL Server no lo interprete según el idioma del login.
+$connection->executeStatement('SET DATEFORMAT ymd');
+
 $entityManager = new EntityManager($connection, $ormConfig);
 
-// 4. Auditoría (listener propio, ver src/Core/AuditListener.php)
-$usernameResolver = static function (): string {
-    // No se inicia sesión si no existe (ej. corriendo bin/console.php por CLI);
-    // en ese caso se audita como 'system'.
-    if (session_status() === PHP_SESSION_NONE) {
-        return 'system';
-    }
-    return $_SESSION['keycloak_user']['preferred_username'] ?? 'system';
-};
+// 4. Auditoría institucional (listener propio, ver AuditListener.php)
+$auditListener = new AuditListener();
 
-$auditListener = new AuditListener($usernameResolver);
 $entityManager->getEventManager()->addEventListener(
     $auditListener->getSubscribedEvents(),
     $auditListener

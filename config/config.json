@@ -1,15 +1,50 @@
 {
     "qr_enabled": true,
-    "qr_base_url": "https://escuela.funcionjudicial.gob.ec/verificar-record/",
-    "letterhead_image": "assets/letterhead.png",
-    "signature_image": "assets/signature.png",
+    "qr_base_url": "https:\/\/escuela.funcionjudicial.gob.ec\/verificar-record\/",
+    "letterhead_image": "assets\/letterhead.png",
+    "signature_image": "assets\/signature.png",
     "column_schema": [
-        { "key": "cedula",         "label": "Cédula",         "width": 30, "visible": true },
-        { "key": "materia",        "label": "Materia",        "width": 45, "visible": true },
-        { "key": "fecha_inicio",   "label": "Fecha Inicio",   "width": 25, "visible": true },
-        { "key": "fecha_fin",      "label": "Fecha Fin",      "width": 25, "visible": true },
-        { "key": "total",          "label": "Total",          "width": 20, "visible": true },
-        { "key": "nota",           "label": "Nota",           "width": 20, "visible": true },
-        { "key": "periodo",        "label": "Año",            "width": 10, "visible": true }
+        {
+            "key": "cedula",
+            "label": "Cédula",
+            "width": 30,
+            "visible": true
+        },
+        {
+            "key": "curso",
+            "label": "Curso",
+            "width": 45,
+            "visible": true
+        },
+        {
+            "key": "fecha_inicio",
+            "label": "Fecha Inicio",
+            "width": 25,
+            "visible": true
+        },
+        {
+            "key": "fecha_fin",
+            "label": "Fecha Fin",
+            "width": 25,
+            "visible": true
+        },
+        {
+            "key": "total",
+            "label": "Total",
+            "width": 20,
+            "visible": true
+        },
+        {
+            "key": "nro_horas",
+            "label": "Horas",
+            "width": 20,
+            "visible": false
+        },
+        {
+            "key": "periodo",
+            "label": "Año",
+            "width": 10,
+            "visible": true
+        }
     ]
 }

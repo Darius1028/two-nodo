@@ -6,6 +6,8 @@
 vendor
 var
 docker
+!docker/uploads.ini
+!docker/php-fpm-import.conf
 docker-compose*.yml
 *.md
 .idea

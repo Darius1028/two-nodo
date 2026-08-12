@@ -30,12 +30,12 @@ class ErrorFinder
             'desc'  => 'Email contains slash (multiple emails)',
         ],
         'missing_totals' => [
-            'sql'   => "SELECT r.id, r.cedula, r.nombre, r.materia, r.nota, r.total FROM App\Entity\AcademicRecord r WHERE r.total IS NULL OR r.nota IS NULL",
-            'label' => 'missing_total_or_grade',
-            'desc'  => 'Record missing total or grade',
+            'sql'   => "SELECT r.id, r.cedula, r.nombre, r.curso, r.nro_horas, r.total FROM App\Entity\AcademicRecord r WHERE r.total IS NULL OR r.curso IS NULL",
+            'label' => 'missing_grade_or_course',
+            'desc'  => 'Record missing grade or course',
         ],
         'invalid_cedulas' => [
-            'sql'   => "SELECT r.id, r.cedula, r.nombre FROM App\Entity\AcademicRecord r WHERE r.cedula IS NULL OR LENGTH(r.cedula) < 5",
+            'sql'   => "SELECT r.id, r.cedula, r.nombre FROM App\Entity\AcademicRecord r WHERE r.cedula IS NULL OR LEN(r.cedula) < 5",
             'label' => 'invalid_cedula',
             'desc'  => 'Cedula is missing or too short',
         ],
@@ -45,9 +45,9 @@ class ErrorFinder
             'desc'  => 'Student name is missing or empty',
         ],
         'invalid_grades' => [
-            'sql'   => "SELECT r.id, r.cedula, r.nombre, r.materia, r.nota, r.total FROM App\Entity\AcademicRecord r WHERE (r.nota IS NOT NULL AND (r.nota < 0 OR r.nota > 20)) OR (r.total IS NOT NULL AND (r.total < 0 OR r.total > 20))",
+            'sql'   => "SELECT r.id, r.cedula, r.nombre, r.curso, r.nro_horas, r.total FROM App\Entity\AcademicRecord r WHERE (r.total IS NOT NULL AND (r.total < 0 OR r.total > 100)) OR (r.nro_horas IS NOT NULL AND r.nro_horas < 0)",
             'label' => 'invalid_grade',
-            'desc'  => 'Grade or total outside valid range (0-20)',
+            'desc'  => 'Grade outside valid range (0-100) or negative hours',
         ],
     ];
 
@@ -60,8 +60,8 @@ class ErrorFinder
         $em = EntityManagerProvider::get();
 
         try {
-            $dql = $def['sql'] . " AND r.origen_tabla = :year ORDER BY r.id";
-            $query = $em->createQuery($dql)->setParameter('year', (string)$year);
+            $dql = $def['sql'] . " AND r.anio = :year ORDER BY r.id";
+            $query = $em->createQuery($dql)->setParameter('year', (int)$year);
             $results = $query->getArrayResult();
 
             foreach ($results as &$row) {
@@ -122,10 +122,11 @@ class ErrorFinder
     {
         $em = EntityManagerProvider::get();
         $qb = $em->createQueryBuilder()
-            ->select('DISTINCT r.origen_tabla')
+            ->select('DISTINCT r.anio')
             ->from(AcademicRecord::class, 'r')
-            ->orderBy('r.origen_tabla', 'DESC');
+            ->where("r.estado != 'X'")
+            ->orderBy('r.anio', 'DESC');
         $result = $qb->getQuery()->getScalarResult();
-        return array_column($result, 'origen_tabla');
+        return array_column($result, 'anio');
     }
 }
