@@ -2,7 +2,7 @@
 
 Sistema web para la gestión, consulta y certificación de registros académicos institucionales. Permite importar, administrar y exportar registros de estudiantes, generar PDFs certificados con QR de verificación, y expone una API REST completa. La autenticación se delega a Keycloak mediante OpenID Connect; la **autorización por roles se resuelve desde una base de datos institucional externa** (independiente de Keycloak).
 
-> **Estado del proyecto:** activo. Última sesión de cambios: soft-delete de registros, visor PDF con PDF.js, caché local de QR, descarga directa de PDFs y mejoras al script de reinicio.
+> **Estado del proyecto:** activo. Última sesión de cambios: endurecimiento de seguridades (TRUSTED_PROXIES, inspección de contenido CSV, alertas de seguridad), refactorización de CsvService en tres clases, y nombre completo en `verify_certificate`.
 
 ---
 
@@ -21,6 +21,8 @@ Sistema web para la gestión, consulta y certificación de registros académicos
 - **API REST JSON** — Endpoints para búsqueda, CRUD, importación CSV, generación y archivo de PDFs.
 - **Panel administrativo** — Interfaz HTML para gestión completa con control de acceso por roles.
 - **Auditoría estilo Envers** — Cada INSERT/UPDATE/DELETE (individual y masivo) genera un snapshot en `AcademicoAUD.RecordAcademico_AUD` vinculado a una revisión en `AUD.REVINFO`. Los registros AUD nunca se borran al eliminar el registro principal.
+- **Inspección de contenido CSV** — Antes de importar (y en la validación previa) se escanea el archivo en busca de XSS almacenado (`<script>`, `javascript:`, `onerror`) e inyección de fórmulas CSV (`=`, `+`, `-`, `@` al inicio de celda). Un archivo sospechoso es bloqueado y dispara una alerta de seguridad de nivel 9.
+- **Alertas de seguridad** — `SecurityAlertService` persiste eventos de seguridad en `var/log/security_alerts.json` (máx. 1000 entradas, FIFO) y los emite por `error_log` con prefijo `[SEGURIDAD][NIVEL N]` para SIEM / sistema de logs del contenedor.
 - **Validación de datos** — Detección de emails corruptos, cédulas inválidas y calificaciones fuera de rango.
 - **Autenticación OAuth2/OIDC** — Integración con Keycloak, soporte para Single Logout y refresh de tokens.
 - **Autorización desacoplada** — Los roles **no** provienen del token de Keycloak; se consultan por cédula o username en la base institucional `PORTAL_APLICATIVOS_CJ` (esquema `ADM`).
@@ -70,7 +72,7 @@ sistema-records/
 │   │   ├── EntityManagerProvider.php  # Bootstrap de Doctrine
 │   │   ├── AuditListener.php          # Listener de auditoría (postPersist/postUpdate/preRemove)
 │   │   ├── ErrorHandler.php           # Manejador global de excepciones
-│   │   └── RequestContext.php         # IP real del cliente (X-Real-IP → X-Forwarded-For → REMOTE_ADDR)
+│   │   └── RequestContext.php         # IP real del cliente con soporte TRUSTED_PROXIES (previene bypass de rate limit)
 │   ├── Doctrine/
 │   │   └── Type/
 │   │       └── SqlServerDateTimeType.php  # Tipo DATETIME compatible con SQL Server
@@ -88,10 +90,14 @@ sistema-records/
 │   │   ├── KeycloakClient.php         # Cliente OIDC
 │   │   ├── SecurityContext.php        # Sesión, callback, logout, refresh, idUsuario lazy
 │   │   ├── RoleProvider.php           # Roles e idUsuario desde base institucional externa
-│   │   └── RateLimiter.php            # Rate limiting por IP (archivo)
+│   │   ├── RateLimiter.php            # Rate limiting por IP (archivo)
+│   │   └── SecurityAlertService.php   # Registro de alertas de seguridad (var/log/security_alerts.json)
 │   └── Service/
 │       ├── AcademicRecordAuditService.php  # Escribe en AUD via DBAL (individual)
-│       ├── CsvService.php                  # Importación/exportación CSV en streaming
+│       ├── CsvService.php                  # Fachada: importación/exportación/validación CSV (delega en las tres clases siguientes)
+│       ├── CsvContentInspector.php         # Validación de encabezados, inspección XSS/fórmulas y reglas por columna
+│       ├── CsvImportProcessor.php          # Inserción por lotes (60 filas/batch) con auditoría e índices
+│       ├── CsvRowMapper.php                # Mapeo de fila CSV a parámetros de inserción de AcademicRecord
 │       ├── PdfService.php                  # Generación y archivo de PDFs
 │       ├── PadesSignerService.php          # Firma digital PDF (CMS detached, incremental update)
 │       ├── RepositorioDocumentalService.php # Cliente del Repositorio Documental
@@ -169,6 +175,7 @@ cp .env.example .env
 | `KEYCLOAK_ROLE_USER` | Nombre del rol de usuario | `SECRE_ACADEMICO` |
 | `KEYCLOAK_CEDULA_CLAIM` | Claim en el token que contiene la cédula | `cedula` |
 | `WORKSPACE_ACCESS_MODE` | `protected` (requiere login) o `public` | `protected` |
+| `TRUSTED_PROXIES` | IPs o CIDRs del proxy/balanceador que habla directo con PHP-FPM (separados por coma). Solo cuando `REMOTE_ADDR` coincide con uno de estos valores se confían `X-Forwarded-For` / `X-Real-IP`. Si queda vacío se usa siempre `REMOTE_ADDR`. | `10.10.10.10,172.16.0.0/16` |
 
 #### Base de datos externa de roles (`PORTAL_APLICATIVOS_CJ`)
 
@@ -304,10 +311,13 @@ Nginx también está configurado con `client_max_body_size 128M` en `docker/ngin
 
 Nginx está configurado con el módulo `ngx_http_realip_module` para resolver la IP real detrás de proxies o redes internas. Los rangos `set_real_ip_from` cubren redes privadas (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) y la red Docker interna. Ajustar en `docker/nginx.conf` si el entorno tiene rangos distintos.
 
-`RequestContext::getClientIp()` aplica la siguiente prioridad:
-1. `X-Forwarded-For` (balanceador/proxy corporativo externo)
-2. `HTTP_X_REAL_IP` (seteado explícitamente por nginx vía fastcgi)
-3. `REMOTE_ADDR` (fallback directo)
+`RequestContext::getClientIp()` aplica la siguiente lógica con soporte de `TRUSTED_PROXIES`:
+
+1. Si `REMOTE_ADDR` **no** está en `TRUSTED_PROXIES` (o la lista está vacía) → se usa `REMOTE_ADDR` directamente. Las cabeceras `X-Forwarded-For` / `X-Real-IP` se descartan porque el cliente podría haberlas inventado (previene bypass de rate limit).
+2. Si `REMOTE_ADDR` **sí** está en `TRUSTED_PROXIES` → se recorre la cadena `X-Forwarded-For` de derecha a izquierda, saltando los proxies confiables, hasta encontrar la primera IP que no lo sea (IP del cliente real).
+3. Si la cadena XFF no aportó una IP de cliente (vacía o todas eran proxies) → se usa `X-Real-IP` como segunda opción.
+
+Configurar `TRUSTED_PROXIES` con las IPs reales del F5 / balanceador / Nginx corporativo para que la resolución de IP sea correcta en auditoría y rate limiting.
 
 Las columnas `ipCrea` / `ipModifica` son `VARCHAR(45)` para soportar tanto IPv4 como IPv6.
 
@@ -445,7 +455,7 @@ Todos los endpoints se acceden en `/api.php`. La autenticación se gestiona por 
 | `GET` | `?action=list_records&year=2024` | Listar registros paginados | USER |
 | `GET` | `?action=get_years` | Años con registros disponibles | USER |
 | `GET` | `?action=generate_pdf&cedula=XXXX` | Info previa a generar PDF | USER |
-| `GET` | `?action=verify_certificate&cedula=XXXX` | Verificación pública (para QR, sin login) | — |
+| `GET` | `?action=verify_certificate&cedula=XXXX` | Verificación pública (para QR, sin login). Devuelve `nombre` con nombre completo (nombre + apellido sin duplicar). | — |
 | `GET` | `?action=get_config` | Configuración pública del sistema | — |
 | `POST` | `?action=insert_record` | Crear un registro | ADMIN |
 | `PUT` | `?action=update_record` | Actualizar un registro | ADMIN |
@@ -532,6 +542,9 @@ docker-compose down -v
 - Control de acceso basado en roles resueltos desde la base institucional (`RoleProvider`), no desde el token de Keycloak.
 - `ErrorHandler` impide que stack traces o rutas internas lleguen al usuario final en producción.
 - Rate limiting por IP en endpoints públicos (sin Redis: archivo con file locking).
+- `TRUSTED_PROXIES` — solo se confían las cabeceras `X-Forwarded-For` / `X-Real-IP` cuando `REMOTE_ADDR` es un proxy declarado; evita que un cliente externo resetee el rate limit falsificando esas cabeceras.
+- Inspección de contenido CSV en importación y validación previa: bloquea XSS almacenado (`<script>`, `javascript:`, `onerror`) e inyección de fórmulas CSV. Archivos sospechosos disparan `SecurityAlertService` con nivel 9.
+- `SecurityAlertService` — registra alertas en `var/log/security_alerts.json` (máx. 1000, FIFO) y en `error_log` con prefijo `[SEGURIDAD][NIVEL N]` para SIEM o sistema de logs del contenedor.
 - Página de error 403 personalizada (`public/403.html`) con redirección al sistema; no expone rutas internas.
 - Los diálogos de confirmación usan modales propios y las notificaciones usan toasts en página (no `window.alert()` / `window.confirm()` nativos), evitando que el diálogo del SO exponga la IP o URL interna del servidor.
 - El visor de PDF usa PDF.js sobre `<canvas>` (sin iframe con visor nativo), eliminando los botones de descarga y "Guardar en Google Drive" del navegador. La descarga se controla exclusivamente desde el botón "Generar PDF".
