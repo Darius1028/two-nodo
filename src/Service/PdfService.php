@@ -237,7 +237,7 @@ class PdfService
         $qb = $em->createQueryBuilder()
             ->select('r')->from(AcademicRecord::class, 'r')
             ->where('r.cedula = :cedula')->setParameter('cedula', $cedula)
-            ->andWhere("r.estado != 'X'")
+            ->andWhere("r.estado != 'X' AND r.aprueba = 'SI'")
             ->orderBy('r.anio', 'DESC')
             ->addOrderBy('r.id', 'DESC');
         return array_map(static fn(AcademicRecord $r) => $r->toArray(), $qb->getQuery()->getResult());
