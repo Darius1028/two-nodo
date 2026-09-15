@@ -5,6 +5,7 @@ namespace App\Service;
 
 use App\Core\EntityManagerProvider;
 use App\Entity\AcademicRecord;
+use App\Exception\InvalidConfigurationException;
 use App\Exception\SystemException;
 use App\Exception\ValidationException;
 use App\Security\SecurityAlertService;
@@ -221,6 +222,21 @@ class CsvService
 
     public static function getHistory(int $limit = 50): array
     {
+        if (self::usesDatabaseHistory()) {
+            $safeLimit = max(1, min(500, $limit));
+            try {
+                return EntityManagerProvider::get()->getConnection()->fetchAllAssociative(
+                    "SELECT TOP ({$safeLimit})
+                            CONVERT(VARCHAR(19), fecha, 120) AS [timestamp],
+                            accion AS [action], detalle AS [details]
+                     FROM Academico.HistorialAplicacion
+                     ORDER BY id DESC"
+                );
+            } catch (\Throwable $e) {
+                throw new SystemException('No se pudo leer el historial compartido.', 0, $e);
+            }
+        }
+
         $path = ConfigService::getHistorialPath();
         if (!file_exists($path)) {
             return [];
@@ -235,6 +251,16 @@ class CsvService
     public static function logHistory(string $action, string $details): void
     {
         try {
+            if (self::usesDatabaseHistory()) {
+                EntityManagerProvider::get()->getConnection()->insert('Academico.HistorialAplicacion', [
+                    'accion' => mb_substr($action, 0, 100),
+                    'detalle' => mb_substr($details, 0, 2000),
+                    'fecha' => (new \DateTimeImmutable())->format('Y-m-d H:i:s.u'),
+                    'nodo' => mb_substr(gethostname() ?: 'unknown', 0, 100),
+                ]);
+                return;
+            }
+
             $path = ConfigService::getHistorialPath();
             $dir = dirname($path);
             if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
@@ -261,6 +287,16 @@ class CsvService
         } catch (\Throwable $e) {
             error_log(sprintf('No se pudo registrar el historial (%s): %s', $action, $e->getMessage()));
         }
+    }
+
+    private static function usesDatabaseHistory(): bool
+    {
+        $value = $_ENV['HISTORY_STORAGE'] ?? (getenv('HISTORY_STORAGE') ?: 'file');
+        $mode = strtolower(trim((string) $value));
+        if (!in_array($mode, ['file', 'database'], true)) {
+            throw new InvalidConfigurationException('HISTORY_STORAGE debe ser "file" o "database".');
+        }
+        return $mode === 'database';
     }
 
     /**

@@ -80,7 +80,7 @@ RUN --mount=type=cache,target=/tmp/composer-cache \
         --no-progress \
         --optimize-autoloader
 
-RUN mkdir -p var/cache var/log public/assets \
+RUN mkdir -p var/cache/assets var/log var/import-work var/object-storage public/assets \
     && chown -R www-data:www-data var public/assets
 
 EXPOSE 9000

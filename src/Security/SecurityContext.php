@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Security;
 
+use App\Infrastructure\SessionStoreConfigurator;
+
 /**
  * Gestiona la sesión del usuario autenticado vía Keycloak, la resolución
  * de roles desde la base institucional externa y las redirecciones de
@@ -21,8 +23,11 @@ class SecurityContext
     public static function ensureSession(): void
     {
         if (session_status() === PHP_SESSION_NONE) {
+            SessionStoreConfigurator::configure();
+            $environment = strtolower((string) ($_ENV['APP_ENV'] ?? (getenv('APP_ENV') ?: 'prod')));
+            $secureCookie = !in_array($environment, ['dev', 'development', 'local', 'test'], true);
             session_start([
-                'cookie_secure'   => ($_ENV['APP_ENV'] ?? 'prod') === 'prod',
+                'cookie_secure'   => $secureCookie,
                 'cookie_httponly' => true,
                 'cookie_samesite' => 'Lax',
             ]);

@@ -4,7 +4,9 @@ declare(strict_types=1);
 require_once __DIR__ . '/../vendor/autoload.php';
 
 use App\Core\EntityManagerProvider;
+use App\Exception\StorageException;
 use App\Service\CsvService;
+use App\Service\ImportFileStorage;
 
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
@@ -17,6 +19,8 @@ const PROGRESS_UPDATE_EVERY = 2000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY_SECONDS = 5;
 const STUCK_JOB_TIMEOUT_HOURS = 2;
+const MAX_STORAGE_RETRIES = 5;
+const IMPORT_LOCK_RESOURCE = 'record-academico:csv-import';
 
 fwrite(STDOUT, "[import-worker] iniciado, revisando Academico.ImportJob cada " . POLL_INTERVAL_SECONDS . "s\n");
 
@@ -31,6 +35,8 @@ try {
         "UPDATE Academico.ImportJob
          SET estado = 'PENDIENTE',
              fechaInicio = NULL,
+             workerId = NULL,
+             proximoIntento = NULL,
              mensajeError = 'Recovery: job stuck detectado automáticamente'
          WHERE estado = 'PROCESANDO'
          AND fechaInicio < DATEADD(hour, -" . STUCK_JOB_TIMEOUT_HOURS . ", GETDATE())"
@@ -165,26 +171,27 @@ exit(0);
 function tomarSiguienteJob(): ?array
 {
     $conn = EntityManagerProvider::get()->getConnection();
+    $workerId = substr((gethostname() ?: 'worker') . ':' . getmypid(), 0, 100);
 
     $job = $conn->fetchAssociative(
-        "SELECT TOP 1 id, rutaArchivo, anio, idPersonaCrea, ipCrea, equipoCrea
-         FROM Academico.ImportJob
-         WHERE estado = 'PENDIENTE'
-         ORDER BY id ASC"
+        ";WITH siguiente AS (
+            SELECT TOP (1) *
+            FROM Academico.ImportJob WITH (UPDLOCK, READPAST, ROWLOCK)
+            WHERE estado = 'PENDIENTE'
+              AND (proximoIntento IS NULL OR proximoIntento <= GETDATE())
+            ORDER BY id ASC
+         )
+         UPDATE siguiente
+            SET estado = 'PROCESANDO', fechaInicio = GETDATE(), workerId = ?
+         OUTPUT INSERTED.id, INSERTED.rutaArchivo, INSERTED.storageBucket,
+                INSERTED.objectKey, INSERTED.objectVersionId, INSERTED.objectETag,
+                INSERTED.sha256, INSERTED.tamanoBytes, INSERTED.intentos,
+                INSERTED.anio, INSERTED.idPersonaCrea, INSERTED.ipCrea,
+                INSERTED.equipoCrea;",
+        [$workerId]
     );
 
     if ($job === false) {
-        return null;
-    }
-
-    $filas = $conn->executeStatement(
-        "UPDATE Academico.ImportJob
-         SET estado = 'PROCESANDO', fechaInicio = GETDATE()
-         WHERE id = ? AND estado = 'PENDIENTE'",
-        [$job['id']]
-    );
-
-    if ($filas === 0) {
         return null;
     }
 
@@ -197,12 +204,16 @@ function tomarSiguienteJob(): ?array
 function procesarJob(array $job): void
 {
     $conn = EntityManagerProvider::get()->getConnection();
+    $lockConnection = $conn;
     $jobId = (int)$job['id'];
+    $temporaryPath = null;
+    $lockAcquired = false;
+    $fileStorage = new ImportFileStorage();
 
     fwrite(STDOUT, sprintf(
         "[import-worker] trabajo #%d: procesando %s (año %d)\n",
         $jobId,
-        $job['rutaArchivo'],
+        $job['objectKey'] ?: $job['rutaArchivo'],
         $job['anio']
     ));
 
@@ -218,7 +229,26 @@ function procesarJob(array $job): void
     };
 
     try {
-        $rutaArchivo = (string)($job['rutaArchivo'] ?? '');
+        $lockAcquired = adquirirBloqueoGlobal($lockConnection);
+        if (!$lockAcquired) {
+            devolverPendientePorBloqueo($conn, $jobId);
+            return;
+        }
+
+        $objectKey = trim((string) ($job['objectKey'] ?? ''));
+        if ($objectKey !== '') {
+            $temporaryPath = $fileStorage->downloadTemporary(
+                (string) ($job['storageBucket'] ?? ''),
+                $objectKey,
+                isset($job['objectVersionId']) ? (string) $job['objectVersionId'] : null,
+                (int) ($job['tamanoBytes'] ?? 0),
+                (string) ($job['sha256'] ?? '')
+            );
+            $rutaArchivo = $temporaryPath;
+        } else {
+            // Compatibilidad temporal para jobs creados antes de la migración.
+            $rutaArchivo = (string) ($job['rutaArchivo'] ?? '');
+        }
 
         if (!is_file($rutaArchivo) || !is_readable($rutaArchivo)) {
             $detalle = !is_file($rutaArchivo)
@@ -250,7 +280,9 @@ function procesarJob(array $job): void
         // Early Return si falla la importación
         if (!$resultado['success']) {
             $mensaje = implode('; ', $resultado['errors']);
-            marcarError($conn, $jobId, $mensaje);
+            if (marcarError($conn, $jobId, $mensaje)) {
+                limpiarFuenteImportacion($fileStorage, $job);
+            }
             return;
         }
 
@@ -265,12 +297,28 @@ function procesarJob(array $job): void
                 $jobId,
                 $resultado['imported']
             ));
+            limpiarFuenteImportacion($fileStorage, $job);
         }
-
-        limpiarArchivoCsv($job['rutaArchivo']);
-
+    } catch (StorageException $e) {
+        $attempts = (int) ($job['intentos'] ?? 0);
+        if ($e->isRetryable() && $attempts < MAX_STORAGE_RETRIES) {
+            reprogramarPorAlmacenamiento($conn, $jobId, $attempts, $e->getMessage());
+        } else {
+            if (marcarError($conn, $jobId, $e->getMessage())) {
+                limpiarFuenteImportacion($fileStorage, $job);
+            }
+        }
     } catch (\Throwable $e) {
-        marcarError($conn, $jobId, $e->getMessage());
+        if (marcarError($conn, $jobId, $e->getMessage())) {
+            limpiarFuenteImportacion($fileStorage, $job);
+        }
+    } finally {
+        if ($temporaryPath !== null && is_file($temporaryPath)) {
+            @unlink($temporaryPath);
+        }
+        if ($lockAcquired) {
+            liberarBloqueoGlobal($lockConnection);
+        }
     }
 }
 
@@ -289,7 +337,9 @@ function marcarTrabajoCompletado(\Doctrine\DBAL\Connection &$conn, int $jobId, i
                  SET estado = 'COMPLETADO',
                      filasImportadas = ?,
                      filasProcesadas = ?,
-                     fechaFin = GETDATE()
+                     fechaFin = GETDATE(),
+                     workerId = NULL,
+                     proximoIntento = NULL
                  WHERE id = ?",
                 [$filasImportadas, $filasImportadas, $jobId]
             );
@@ -325,7 +375,7 @@ function limpiarArchivoCsv(string $rutaArchivo): void
 /**
  * Marca un job como ERROR
  */
-function marcarError(\Doctrine\DBAL\Connection $conn, int $jobId, string $mensaje): void
+function marcarError(\Doctrine\DBAL\Connection $conn, int $jobId, string $mensaje): bool
 {
     fwrite(STDERR, sprintf("[import-worker] trabajo #%d falló: %s\n", $jobId, $mensaje));
 
@@ -334,15 +384,99 @@ function marcarError(\Doctrine\DBAL\Connection $conn, int $jobId, string $mensaj
             "UPDATE Academico.ImportJob
              SET estado = 'ERROR',
                  mensajeError = ?,
-                 fechaFin = GETDATE()
+                 fechaFin = GETDATE(),
+                 workerId = NULL,
+                 proximoIntento = NULL
              WHERE id = ?",
             [$mensaje, $jobId]
         );
+        return true;
     } catch (\Throwable $e) {
         fwrite(STDERR, sprintf(
             "[import-worker] ADEMÁS no se pudo marcar el trabajo #%d como ERROR (%s).\n",
             $jobId,
             $e->getMessage()
         ));
+        return false;
+    }
+}
+
+function limpiarFuenteImportacion(ImportFileStorage $storage, array $job): void
+{
+    $objectKey = trim((string) ($job['objectKey'] ?? ''));
+    if ($objectKey === '') {
+        limpiarArchivoCsv((string) ($job['rutaArchivo'] ?? ''));
+        return;
+    }
+
+    try {
+        $storage->delete(
+            (string) ($job['storageBucket'] ?? ''),
+            $objectKey,
+            isset($job['objectVersionId']) ? (string) $job['objectVersionId'] : null
+        );
+        fwrite(STDOUT, "[import-worker] Objeto CSV eliminado: {$objectKey}\n");
+    } catch (\Throwable $e) {
+        // El lifecycle del bucket funciona como red de seguridad.
+        fwrite(STDERR, "[import-worker] No se pudo eliminar el objeto {$objectKey}: {$e->getMessage()}\n");
+    }
+}
+
+function reprogramarPorAlmacenamiento(
+    \Doctrine\DBAL\Connection $conn,
+    int $jobId,
+    int $attempts,
+    string $message
+): void {
+    $delay = min(900, 30 * (2 ** $attempts));
+    $conn->executeStatement(
+        "UPDATE Academico.ImportJob
+         SET estado = 'PENDIENTE',
+             intentos = intentos + 1,
+             proximoIntento = DATEADD(second, ?, GETDATE()),
+             fechaInicio = NULL,
+             workerId = NULL,
+             mensajeError = ?
+         WHERE id = ?",
+        [$delay, 'Error temporal de almacenamiento: ' . $message, $jobId]
+    );
+    fwrite(STDERR, "[import-worker] trabajo #{$jobId} reprogramado en {$delay}s por almacenamiento.\n");
+}
+
+function devolverPendientePorBloqueo(\Doctrine\DBAL\Connection $conn, int $jobId): void
+{
+    $conn->executeStatement(
+        "UPDATE Academico.ImportJob
+         SET estado = 'PENDIENTE', fechaInicio = NULL, workerId = NULL,
+             proximoIntento = DATEADD(second, 10, GETDATE())
+         WHERE id = ?",
+        [$jobId]
+    );
+}
+
+function adquirirBloqueoGlobal(\Doctrine\DBAL\Connection $conn): bool
+{
+    $result = $conn->fetchOne(
+        "DECLARE @resultado int;
+         EXEC @resultado = sys.sp_getapplock
+              @Resource = '" . IMPORT_LOCK_RESOURCE . "',
+              @LockMode = 'Exclusive',
+              @LockOwner = 'Session',
+              @LockTimeout = 0;
+         SELECT @resultado;"
+    );
+    return $result !== false && (int) $result >= 0;
+}
+
+function liberarBloqueoGlobal(\Doctrine\DBAL\Connection $conn): void
+{
+    try {
+        $conn->executeStatement(
+            "EXEC sys.sp_releaseapplock
+             @Resource = '" . IMPORT_LOCK_RESOURCE . "',
+             @LockOwner = 'Session';"
+        );
+    } catch (\Throwable $e) {
+        fwrite(STDERR, '[import-worker] No se pudo liberar el bloqueo global: ' . $e->getMessage() . "\n");
     }
 }

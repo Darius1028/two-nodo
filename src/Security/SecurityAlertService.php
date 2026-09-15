@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Security;
 
+use App\Core\EntityManagerProvider;
+use App\Exception\InvalidConfigurationException;
 use App\Exception\SystemException;
 use App\Service\ConfigService;
 use Throwable;
@@ -11,9 +13,9 @@ use Throwable;
 /**
  * Registro de alertas de seguridad con severidad (escala 1-10).
  *
- * Cada alerta se persiste en var/log/security_alerts.json (gitignored) y
- * además se emite por error_log con un prefijo reconocible para que pueda
- * ser capturada por un SIEM / el sistema de logs del contenedor.
+ * En un despliegue multinodo cada alerta se persiste en SQL Server. El JSON
+ * gitignored se conserva para desarrollo de un solo nodo. En ambos modos se
+ * emite por error_log para que el SIEM pueda capturarla.
  */
 final class SecurityAlertService
 {
@@ -47,6 +49,24 @@ final class SecurityAlertService
     private static function persist(array $entry): void
     {
         try {
+            $storage = $_ENV['SECURITY_ALERT_STORAGE'] ?? (getenv('SECURITY_ALERT_STORAGE') ?: 'file');
+            $mode = strtolower(trim((string) $storage));
+            if (!in_array($mode, ['file', 'database'], true)) {
+                throw new InvalidConfigurationException(
+                    'SECURITY_ALERT_STORAGE debe ser "file" o "database".'
+                );
+            }
+            if ($mode === 'database') {
+                EntityManagerProvider::get()->getConnection()->insert('Academico.AlertaSeguridad', [
+                    'fecha' => (new \DateTimeImmutable())->format('Y-m-d H:i:s.u'),
+                    'nivel' => (int) ($entry['nivel'] ?? 0),
+                    'tipo' => mb_substr((string) ($entry['tipo'] ?? 'unknown'), 0, 100),
+                    'datosJson' => json_encode($entry, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
+                    'nodo' => mb_substr(gethostname() ?: 'unknown', 0, 100),
+                ]);
+                return;
+            }
+
             $path = ConfigService::getSecurityAlertPath();
             $dir = dirname($path);
             if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {

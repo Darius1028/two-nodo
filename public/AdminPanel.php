@@ -8,9 +8,11 @@ use App\Core\RequestContext;
 use App\Entity\AcademicRecord;
 use App\Security\RateLimiter;
 use App\Security\SecurityContext;
+use App\Service\AssetStorageService;
 use App\Service\ConfigService;
 use App\Service\CsvService;
 use App\Service\ErrorFinder;
+use App\Service\ImportJobService;
 
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__ . '/..');
 $dotenv->safeLoad();
@@ -128,49 +130,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     break;
                 }
 
-                // La importación real YA NO corre acá: se guarda el archivo
-                // en una ubicación persistente (compartida con el contenedor
-                // import-worker vía el mismo bind mount de var/) y se encola
-                // un trabajo en Academico.ImportJob. bin/import-worker.php
-                // lo procesa en segundo plano, fuera de este request HTTP --
-                // así una importación de 45 minutos no depende de que
-                // sobrevivan la VPN del usuario, su navegador, ni ningún
-                // timeout de nginx/PHP-FPM.
-                $uploadDir = __DIR__ . '/../var/import-uploads';
-                if (!is_dir($uploadDir)) {
-                    mkdir($uploadDir, 0775, true);
-                }
-                $rutaDestino = $uploadDir . '/' . uniqid('import_', true) . '.csv';
-
-                if (!move_uploaded_file($_FILES['csv_file']['tmp_name'], $rutaDestino)) {
-                    $message = 'No se pudo guardar el archivo subido.';
+                // La carga se conserva en almacenamiento de objetos para que
+                // cualquier worker de cualquier nodo pueda reclamar el job.
+                // La ruta local de PHP sólo vive durante este request.
+                try {
+                    $queued = (new ImportJobService())->enqueue(
+                        $_FILES['csv_file']['tmp_name'],
+                        (string) ($_FILES['csv_file']['name'] ?? 'import.csv'),
+                        $year,
+                        SecurityContext::getCurrentUserId() ?? 0,
+                        RequestContext::getClientIp(),
+                        RequestContext::getClientHostname(),
+                        (int) $headerCheck['rows']
+                    );
+                    $jobId = $queued['id'];
+                } catch (\Throwable $e) {
+                    $message = 'No se pudo almacenar y encolar el archivo: ' . $e->getMessage();
                     $messageType = 'error';
                     break;
                 }
-
-                // Guardar la ruta canónica (realpath) en la BD: elimina el
-                // `/public/../var` y deja `/var/www/html/var/import-uploads/...`
-                // que es exactamente el mount compartido con el worker. Así el
-                // worker abre siempre la misma ruta que el panel.
-                $rutaCanonica = realpath($rutaDestino);
-                $rutaArchivoDb = $rutaCanonica !== false ? $rutaCanonica : $rutaDestino;
-
-                $em = EntityManagerProvider::get();
-                $jobId = (int) $em->getConnection()->fetchOne(
-                        "INSERT INTO Academico.ImportJob
-                        (nombreArchivo, rutaArchivo, anio, filasTotal, idPersonaCrea, ipCrea, equipoCrea)
-                     OUTPUT INSERTED.id
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        [
-                                $_FILES['csv_file']['name'],
-                                $rutaArchivoDb,
-                                $year,
-                                $headerCheck['rows'],
-                                SecurityContext::getCurrentUserId() ?? 0,
-                                RequestContext::getClientIp(),
-                                RequestContext::getClientHostname(),
-                        ]
-                );
 
                 $message = "Importación encolada (trabajo #$jobId). Procesando en segundo plano...";
                 $messageType = 'success';
@@ -298,9 +276,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $messageType = 'error';
                     break;
                 }
-                ConfigService::toggleQr();
-                $message = 'QR actualizado';
-                $messageType = 'success';
+                if (ConfigService::toggleQr()) {
+                    $message = 'QR actualizado';
+                    $messageType = 'success';
+                } else {
+                    $message = 'No se pudo actualizar la configuración compartida del QR.';
+                    $messageType = 'error';
+                }
                 break;
 
             case 'upload_asset':
@@ -316,37 +298,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!isset($_FILES['asset_file']) || $_FILES['asset_file']['error'] !== UPLOAD_ERR_OK) {
                     $message = 'Error en subida.'; $messageType = 'error'; break;
                 }
-                $tmpPath = $_FILES['asset_file']['tmp_name'];
-                $maxSize = 5 * 1024 * 1024;
-                if (filesize($tmpPath) > $maxSize) {
-                    $message = 'La imagen no debe superar 5 MB.'; $messageType = 'error'; break;
-                }
-                $ext = strtolower(pathinfo((string)($_FILES['asset_file']['name'] ?? ''), PATHINFO_EXTENSION));
-                if (!in_array($ext, ['png', 'jpg', 'jpeg'], true)) {
-                    $message = 'Solo se permiten archivos PNG o JPEG.'; $messageType = 'error'; break;
-                }
-                $finfo = new finfo(FILEINFO_MIME_TYPE);
-                $mime  = $finfo->file($tmpPath);
-                if (!in_array($mime, ['image/png', 'image/jpeg'], true)) {
-                    $message = 'El archivo no es una imagen válida.'; $messageType = 'error'; break;
-                }
-                $imgInfo = @getimagesize($tmpPath);
-                if ($imgInfo === false) {
-                    $message = 'No se pudo verificar la imagen.'; $messageType = 'error'; break;
-                }
-                $hash = hash_file('sha256', $tmpPath);
-                $targetDir = __DIR__ . '/assets/';
-                if (!is_dir($targetDir)) { mkdir($targetDir, 0755, true); }
-                $targetFile = $targetDir . ($assetType === 'letterhead' ? 'letterhead.png' : 'signature.png');
-                if (move_uploaded_file($tmpPath, $targetFile)) {
-                    $cfg = ConfigService::get();
-                    $cfg[$assetType . '_image'] = 'assets/' . basename($targetFile);
-                    ConfigService::set($cfg);
+                try {
+                    $storedAsset = (new AssetStorageService())->upload(
+                        $assetType,
+                        (string) $_FILES['asset_file']['tmp_name']
+                    );
                     $message = 'Imagen cargada.';
                     $messageType = 'success';
-                    CsvService::logHistory('Carga de Imagen', "Asset '$assetType' actualizado. SHA-256: $hash.");
-                } else {
-                    $message = 'No se pudo mover el archivo.';
+                    CsvService::logHistory(
+                        'Carga de Imagen',
+                        "Asset '$assetType' actualizado. SHA-256: {$storedAsset->sha256}."
+                    );
+                } catch (\Throwable $e) {
+                    $message = 'No se pudo guardar la imagen: ' . $e->getMessage();
                     $messageType = 'error';
                 }
                 break;
@@ -874,7 +838,7 @@ $csrf = csrfToken();
                     <input type="hidden" name="csrf_token" value="<?= e($csrf) ?>">
                     <div class="form-group">
                         <label for="asset_letterhead">Membrete</label>
-                        <input type="file" id="asset_letterhead" name="asset_file" accept=".png" required>
+                        <input type="file" id="asset_letterhead" name="asset_file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" required>
                     </div>
                     <button type="submit" class="btn btn-primary btn-sm">Actualizar</button>
                 </form>
@@ -884,7 +848,7 @@ $csrf = csrfToken();
                     <input type="hidden" name="csrf_token" value="<?= e($csrf) ?>">
                     <div class="form-group">
                         <label for="asset_signature">Firma</label>
-                        <input type="file" id="asset_signature" name="asset_file" accept=".png" required>
+                        <input type="file" id="asset_signature" name="asset_file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" required>
                     </div>
                     <button type="submit" class="btn btn-primary btn-sm">Actualizar</button>
                 </form>

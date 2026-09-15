@@ -2,14 +2,16 @@
 
 Sistema web para la gestión, consulta y certificación de registros académicos institucionales. Permite importar, administrar y exportar registros de estudiantes, generar PDFs certificados con QR de verificación, y expone una API REST completa. La autenticación se delega a Keycloak mediante OpenID Connect; la **autorización por roles se resuelve desde una base de datos institucional externa** (independiente de Keycloak).
 
-> **Estado del proyecto:** activo. Última sesión de cambios: endurecimiento de seguridades (TRUSTED_PROXIES, inspección de contenido CSV, alertas de seguridad), refactorización de CsvService en tres clases, y nombre completo en `verify_certificate`.
+> **Estado del proyecto:** activo. El despliegue multinodo usa almacenamiento
+> S3/MinIO y estado compartido en SQL Server. Consulte la
+> [guía de despliegue en dos nodos](docs/ALMACENAMIENTO_MULTINODO.md).
 
 ---
 
 ## Características principales
 
 - **Gestión de registros** — CRUD completo de registros académicos por cédula, materia, período y año. La eliminación es **soft delete**: los registros pasan a `estado = 'X'` y son invisibles en consultas, pero permanecen en la base para auditoría.
-- **Importación CSV en streaming** — Carga masiva sin cargar el archivo en RAM; detecta separador y encoding automáticamente. Soporta archivos de hasta 128 MB sin crashear el servidor.
+- **Importación CSV asíncrona y compartida** — El nodo receptor valida y sube el archivo a S3/MinIO; cualquier worker puede reclamarlo desde la cola SQL, comprobar su SHA-256 e importarlo en streaming. Soporta archivos de hasta 128 MB.
 - **Exportación CSV** — Descarga de registros por año o por cédula (excluye registros con `estado = 'X'`).
 - **Validación previa de CSV** — Endpoint `validate_csv` que reporta errores de columnas antes de importar.
 - **Generación de PDFs** — Certificados con membrete, firma y código QR verificable. Al pulsar "Generar PDF" el archivo se descarga automáticamente y se archiva en el Repositorio Documental en un solo paso.
@@ -22,13 +24,14 @@ Sistema web para la gestión, consulta y certificación de registros académicos
 - **Panel administrativo** — Interfaz HTML para gestión completa con control de acceso por roles.
 - **Auditoría estilo Envers** — Cada INSERT/UPDATE/DELETE (individual y masivo) genera un snapshot en `AcademicoAUD.RecordAcademico_AUD` vinculado a una revisión en `AUD.REVINFO`. Los registros AUD nunca se borran al eliminar el registro principal.
 - **Inspección de contenido CSV** — Antes de importar (y en la validación previa) se escanea el archivo en busca de XSS almacenado (`<script>`, `javascript:`, `onerror`) e inyección de fórmulas CSV (`=`, `+`, `-`, `@` al inicio de celda). Un archivo sospechoso es bloqueado y dispara una alerta de seguridad de nivel 9.
-- **Alertas de seguridad** — `SecurityAlertService` persiste eventos de seguridad en `var/log/security_alerts.json` (máx. 1000 entradas, FIFO) y los emite por `error_log` con prefijo `[SEGURIDAD][NIVEL N]` para SIEM / sistema de logs del contenedor.
+- **Alertas de seguridad compartidas** — `SecurityAlertService` persiste eventos en SQL en producción y los emite por `error_log` con prefijo `[SEGURIDAD][NIVEL N]` para el SIEM.
 - **Validación de datos** — Detección de emails corruptos, cédulas inválidas y calificaciones fuera de rango.
 - **Autenticación OAuth2/OIDC** — Integración con Keycloak, soporte para Single Logout y refresh de tokens.
 - **Autorización desacoplada** — Los roles **no** provienen del token de Keycloak; se consultan por cédula o username en la base institucional `PORTAL_APLICATIVOS_CJ` (esquema `ADM`).
 - **Manejo global de errores** — `ErrorHandler` registra como excepción todo error no controlado; el usuario nunca ve stack traces en producción.
 - **Página de error 403** — Página personalizada con redirección al sistema cuando se intenta acceder directamente a recursos protegidos.
-- **Rate limiting** — Protección por IP en endpoints públicos mediante archivo con file locking (sin Redis ni Memcached).
+- **Estado multinodo** — Sesiones y rate limiting en SQL Server; configuración editable, historial y alertas en SQL Server.
+- **Archivos compartidos** — CSV pendientes, membretes y firmas en buckets privados S3/MinIO; el disco local sólo conserva temporales y cachés regenerables.
 
 ---
 
@@ -47,6 +50,8 @@ Sistema web para la gestión, consulta y certificación de registros académicos
 | Servidor web | Nginx |
 | Runtime | PHP-FPM |
 | Contenedores | Docker / Docker Compose |
+| Archivos compartidos | API S3 compatible (MinIO) mediante AWS SDK for PHP |
+| Sesiones y rate limiting | SQL Server |
 
 ---
 
@@ -90,8 +95,8 @@ sistema-records/
 │   │   ├── KeycloakClient.php         # Cliente OIDC
 │   │   ├── SecurityContext.php        # Sesión, callback, logout, refresh, idUsuario lazy
 │   │   ├── RoleProvider.php           # Roles e idUsuario desde base institucional externa
-│   │   ├── RateLimiter.php            # Rate limiting por IP (archivo)
-│   │   └── SecurityAlertService.php   # Registro de alertas de seguridad (var/log/security_alerts.json)
+│   │   ├── RateLimiter.php            # Rate limiting por IP (SQL Server en multinodo)
+│   │   └── SecurityAlertService.php   # Registro compartido de alertas
 │   └── Service/
 │       ├── AcademicRecordAuditService.php  # Escribe en AUD via DBAL (individual)
 │       ├── CsvService.php                  # Fachada: importación/exportación/validación CSV (delega en las tres clases siguientes)
@@ -102,7 +107,10 @@ sistema-records/
 │       ├── PadesSignerService.php          # Firma digital PDF (CMS detached, incremental update)
 │       ├── RepositorioDocumentalService.php # Cliente del Repositorio Documental
 │       ├── ErrorFinder.php                 # Detección de errores en datos
-│       ├── ConfigService.php               # Lectura de config.json y env
+│       ├── ConfigService.php               # Configuración compartida en SQL
+│       ├── ImportFileStorage.php           # CSV en S3/MinIO
+│       ├── ImportJobService.php            # Encolado transaccional compensado
+│       ├── AssetStorageService.php          # Membrete/firma versionados
 │       └── KeycloakTokenService.php        # Token de servicio (client_credentials)
 ├── templates/
 │   └── includes/header.php    # Header HTML compartido
@@ -111,8 +119,20 @@ sistema-records/
 │   └── config.json            # Configuración de la aplicación
 ├── database/
 │   └── create_schema.sql      # Script de creación de schemas y tablas (idempotente)
+├── scripts/
+│   └── 20260914_minio_multinode.sql # Migración aditiva para dos nodos
 ├── bin/
-│   └── console.php            # Consola de comandos Doctrine
+│   ├── console.php            # Consola de comandos Doctrine
+│   ├── import-worker.php      # Worker de la cola compartida
+│   └── storage-init.php       # Buckets, versionado y lifecycle
+├── docs/
+│   └── ALMACENAMIENTO_MULTINODO.md # Runbook de producción
+├── deploy/minio-two-node/
+│   ├── compose.yml          # Un miembro MinIO por servidor, pool compartido
+│   ├── minio.env.example    # Topología, discos y secretos por archivo
+│   ├── app.compose.yml      # Resuelve los hostnames del clúster dentro de Docker
+│   ├── preflight.sh         # Valida hostname, resolución, discos, TLS y Compose
+│   └── check-cluster.sh     # Comprueba quorum de lectura/escritura
 ├── docker/
 │   ├── Dockerfile             # PHP 8.2-FPM con driver SQL Server
 │   ├── nginx.conf             # Configuración de Nginx (128M max body)
@@ -134,6 +154,8 @@ sistema-records/
 - Acceso de red a una instancia de **Microsoft SQL Server** (2016 o superior) para la base de datos principal.
 - Acceso de red a la base institucional **`PORTAL_APLICATIVOS_CJ`** (SQL Server) para resolución de roles.
 - Servidor **Keycloak** configurado con un realm y client para esta aplicación.
+- Para producción multinodo, cuatro discos dedicados por host para el clúster
+  **MinIO distribuido** y un **SQL Server compartido** accesible desde ambos.
 
 ---
 
@@ -205,6 +227,30 @@ Los roles **no** vienen del token de Keycloak. Se consultan en una base instituc
 |---|---|
 | `REPOSITORIO_DOCUMENTAL_URL` | URL del endpoint para archivar documentos PDF |
 
+#### MinIO/S3 y estado compartido
+
+En producción, los dos nodos usan el mismo clúster, buckets y credenciales. Con
+un F5/VIP también usan el mismo endpoint; sin éste, cada aplicación puede usar
+el miembro MinIO de su propio servidor. Las variables completas y el orden de
+migración están en la [guía multinodo](docs/ALMACENAMIENTO_MULTINODO.md).
+
+| Variable | Descripción | Valor de producción |
+|---|---|---|
+| `STORAGE_DRIVER` | Backend de objetos (`s3` o `local`) | `s3` |
+| `MINIO_ENDPOINT` | VIP S3 común o miembro local del mismo clúster | `https://minio.interno.example` |
+| `MINIO_IMPORT_BUCKET` | Bucket privado para CSV temporales | `record-academico-imports` |
+| `MINIO_ASSET_BUCKET` | Bucket privado y versionado para assets PDF | `record-academico-assets` |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Credencial S3 de runtime | secreto externo |
+| `CONFIG_STORAGE` | Configuración mutable | `database` |
+| `HISTORY_STORAGE` | Historial de operaciones | `database` |
+| `SECURITY_ALERT_STORAGE` | Alertas persistentes | `database` |
+| `SESSION_HANDLER` | Backend de sesiones PHP | `database` |
+| `RATE_LIMIT_STORE` | Backend global de contadores | `database` |
+
+Antes de activar estos valores ejecute la migración SQL aditiva
+`scripts/20260914_minio_multinode.sql` y el inicializador
+`php bin/storage-init.php`.
+
 #### Firma digital PDF (opcional)
 
 Al activar la firma, cada PDF generado (tanto en descarga directa como en archivado al Repositorio Documental) se firma criptográficamente en una revisión incremental antes de entregarse. La configuración es exclusivamente por `.env`; no se lee de `config.json`.
@@ -231,32 +277,41 @@ Ver la sección [Firma digital PDF](#firma-digital-pdf) para detalles sobre alca
 
 ### 2. Configuración de la aplicación
 
-El archivo `config/config.json` controla opciones específicas de la aplicación:
+El archivo `config/config.json` contiene los valores empaquetados de arranque:
 
 ```json
 {
   "qr_enabled": true,
   "qr_base_url": "https://tu-dominio.com/verificar-record/",
-  "letterhead_image": "pdfjs/letterhead.png",
-  "signature_image": "pdfjs/signature.png",
+  "letterhead_image": "assets/letterhead.png",
+  "signature_image": "assets/signature.png",
   "column_schema": [ ... ]
 }
 ```
 
 - **`qr_enabled`** — Activa el código QR en los PDFs generados.
 - **`qr_base_url`** — URL base de fallback para los QR. Si está definida `QR_BASE_URL` en el entorno, esta es ignorada.
-- **`letterhead_image`** — Ruta a la imagen del membrete (relativa a `public/`).
-- **`signature_image`** — Ruta a la imagen de la firma (relativa a `public/`).
+- **`letterhead_image`** — Ruta legada/valor de bootstrap del membrete.
+- **`signature_image`** — Ruta legada/valor de bootstrap de la firma.
 - **`column_schema`** — Define las columnas disponibles para importación CSV y visualización en PDF. Cada columna tiene `key`, `label`, `width` y `visible`.
+
+Con `CONFIG_STORAGE=database`, los valores editables se leen de
+`Academico.ConfiguracionAplicacion`; el JSON queda como fallback versionado con
+la aplicación. Así una modificación realizada en un nodo es visible en el otro.
 
 ### 3. Assets
 
-Coloca los archivos de membrete y firma en `public/assets/`:
+Las imágenes incluidas en `public/assets/` sirven sólo como bootstrap:
 
 ```
 public/assets/letterhead.png
 public/assets/signature.png
 ```
+
+Las cargas posteriores desde el panel aceptan PNG o JPEG, se normalizan a PNG,
+se guardan con clave inmutable por SHA-256 en `MINIO_ASSET_BUCKET` y se activan
+mediante la configuración SQL. Nginx bloquea su descarga directa desde
+`/assets/letterhead.png` y `/assets/signature.png`.
 
 ---
 
@@ -273,11 +328,11 @@ cd sistema-records
 cp .env.example .env
 # Editar .env con los valores de tu entorno
 
-# 3. Construir e iniciar los contenedores
-docker-compose up -d --build
+# 3. Construir e iniciar los contenedores de la aplicación
+docker compose up -d --build
 
 # 4. Verificar que los servicios estén corriendo
-docker-compose ps
+docker compose ps
 ```
 
 La aplicación estará disponible en `http://localhost:8010`.
@@ -290,6 +345,25 @@ La aplicación estará disponible en `http://localhost:8010`.
 |---|---|------------------|---|
 | `nginx` | nginx:alpine | `8010:80`        | Servidor web / proxy inverso |
 | `php-app` | (Dockerfile local) | `9000` (interno) | PHP 8.2-FPM con driver SQL Server |
+| `import-worker` | `academic-php:8.2-dev` | — | Consume la cola SQL y descarga CSV desde S3 |
+| `minio` | MinIO fijado por versión | `127.0.0.1:9000/9001` | Sólo perfil local `local-infra` |
+| `storage-init` | `academic-php:8.2-dev` | — | Inicializador idempotente de buckets, sólo perfil local |
+
+Para una prueba local completa, configure en `.env` los hosts internos
+`MINIO_ENDPOINT=http://minio:9000` y TLS desactivado; luego:
+
+```bash
+docker compose --profile local-infra up -d --build minio
+docker compose --profile local-infra run --rm storage-init
+docker compose --profile local-infra up -d php-app import-worker nginx
+```
+
+En producción no use el MinIO de un nodo del perfil local. El repositorio
+incluye en `deploy/minio-two-node/` un clúster MinIO distribuido que se ejecuta
+sobre los mismos dos servidores de aplicación, con cuatro discos dedicados por
+host. Siga el [runbook de dos nodos](docs/ALMACENAMIENTO_MULTINODO.md), que
+incluye preflight, limitaciones de quorum, migración, health checks, prueba
+cruzada y rollback.
 
 ### Límites de subida y memoria
 
@@ -460,7 +534,9 @@ Todos los endpoints se acceden en `/api.php`. La autenticación se gestiona por 
 | `POST` | `?action=insert_record` | Crear un registro | ADMIN |
 | `PUT` | `?action=update_record` | Actualizar un registro | ADMIN |
 | `DELETE` | `?action=delete_record&id=1` | Soft-delete de un registro (`estado='X'`) | ADMIN |
-| `POST` | `?action=import_csv` | Importar registros desde CSV | ADMIN |
+| `POST` | `?action=import_csv` | Validar, almacenar y encolar CSV; responde `202` con `job_id` | ADMIN |
+| `GET` | `?action=import_status&job_id=1` | Consultar progreso/resultado de un job | ADMIN |
+| `GET` | `?action=import_status_latest` | Consultar el último job del usuario | ADMIN |
 | `POST` | `?action=validate_csv` | Validar CSV sin importar | ADMIN |
 | `GET` | `?action=export_csv&year=2024` | Exportar registros a CSV | ADMIN |
 | `GET` | `?action=check_errors&year=2024` | Reporte de errores en datos | ADMIN |
@@ -470,7 +546,12 @@ Todos los endpoints se acceden en `/api.php`. La autenticación se gestiona por 
 
 **Paginación:** Los listados aceptan `limit` (1–500, default 50) y `offset`.
 
-**Rate limiting:** `verify_certificate` admite máximo 15 solicitudes por minuto por IP.
+**Importación:** es asíncrona. El cliente debe conservar el `job_id` y consultar
+`import_status`; recibir `202` confirma que el archivo quedó durablemente
+encolado, no que sus filas ya fueron importadas.
+
+**Rate limiting:** `verify_certificate` admite máximo 15 solicitudes por minuto
+por IP. En producción los contadores son globales mediante SQL Server.
 
 ---
 
@@ -508,28 +589,28 @@ documentales, ejecutar `scripts/20260723_documento_academico.sql`.
 
 ```bash
 # Ver logs de la aplicación
-docker-compose logs -f php-app
+docker compose logs -f php-app
 
 # Ver logs de Nginx
-docker-compose logs -f nginx
+docker compose logs -f nginx
 
 # Acceder al contenedor PHP
-docker-compose exec php-app bash
+docker compose exec php-app bash
 
 # Instalar dependencias manualmente
-docker-compose exec php-app composer install
+docker compose exec php-app composer install
 
-# Ver historial de operaciones
-docker-compose exec php-app cat var/log/historial.json
+# Ver logs del worker
+docker compose logs -f import-worker
 
 # Reiniciar contenedores (script de conveniencia)
 bash reiniciar.sh
 
 # Detener los servicios
-docker-compose down
+docker compose down
 
-# Detener y eliminar volúmenes
-docker-compose down -v
+# Sólo en desarrollo: detener y eliminar también datos locales MinIO/vendor
+docker compose --profile local-infra down -v
 ```
 
 ---
@@ -541,10 +622,12 @@ docker-compose down -v
 - Escape de HTML en todas las salidas para prevenir XSS.
 - Control de acceso basado en roles resueltos desde la base institucional (`RoleProvider`), no desde el token de Keycloak.
 - `ErrorHandler` impide que stack traces o rutas internas lleguen al usuario final en producción.
-- Rate limiting por IP en endpoints públicos (sin Redis: archivo con file locking).
+- Rate limiting por IP global mediante SQL Server en despliegues multinodo; el modo archivo queda sólo para desarrollo de un nodo.
 - `TRUSTED_PROXIES` — solo se confían las cabeceras `X-Forwarded-For` / `X-Real-IP` cuando `REMOTE_ADDR` es un proxy declarado; evita que un cliente externo resetee el rate limit falsificando esas cabeceras.
 - Inspección de contenido CSV en importación y validación previa: bloquea XSS almacenado (`<script>`, `javascript:`, `onerror`) e inyección de fórmulas CSV. Archivos sospechosos disparan `SecurityAlertService` con nivel 9.
-- `SecurityAlertService` — registra alertas en `var/log/security_alerts.json` (máx. 1000, FIFO) y en `error_log` con prefijo `[SEGURIDAD][NIVEL N]` para SIEM o sistema de logs del contenedor.
+- `SecurityAlertService` — registra alertas en SQL con `SECURITY_ALERT_STORAGE=database` y en `error_log` con prefijo `[SEGURIDAD][NIVEL N]` para SIEM; el JSON local queda como modo de desarrollo.
+- Sesiones PHP compartidas y bloqueadas en SQL Server, por lo que no se requiere afinidad de sesión en el balanceador.
+- CSV y assets PDF privados en S3/MinIO, con comprobación SHA-256 antes de su consumo.
 - Página de error 403 personalizada (`public/403.html`) con redirección al sistema; no expone rutas internas.
 - Los diálogos de confirmación usan modales propios y las notificaciones usan toasts en página (no `window.alert()` / `window.confirm()` nativos), evitando que el diálogo del SO exponga la IP o URL interna del servidor.
 - El visor de PDF usa PDF.js sobre `<canvas>` (sin iframe con visor nativo), eliminando los botones de descarga y "Guardar en Google Drive" del navegador. La descarga se controla exclusivamente desde el botón "Generar PDF".

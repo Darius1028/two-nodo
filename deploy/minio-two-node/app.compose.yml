@@ -1,0 +1,14 @@
+# Los contenedores Docker no heredan las entradas de /etc/hosts del host.
+# Este override sólo replica la resolución de los hostnames del clúster dentro
+# de PHP y del worker. La aplicación continúa usando app-record-01/02, nunca
+# las IP directamente, como MINIO_ENDPOINT.
+services:
+  php-app:
+    extra_hosts:
+      - "app-record-01:${APP_RECORD_01_IP:?set APP_RECORD_01_IP}"
+      - "app-record-02:${APP_RECORD_02_IP:?set APP_RECORD_02_IP}"
+
+  import-worker:
+    extra_hosts:
+      - "app-record-01:${APP_RECORD_01_IP:?set APP_RECORD_01_IP}"
+      - "app-record-02:${APP_RECORD_02_IP:?set APP_RECORD_02_IP}"

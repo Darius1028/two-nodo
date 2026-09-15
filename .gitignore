@@ -16,3 +16,6 @@ var/log/*.json
 *.p12
 *.pfx
 *.key
+
+# Credenciales administrativas del clúster MinIO de producción
+/deploy/minio-two-node/minio.env

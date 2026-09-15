@@ -15,6 +15,7 @@ use App\Security\SecurityContext;
 use App\Service\ConfigService;
 use App\Service\CsvService;
 use App\Service\ErrorFinder;
+use App\Service\ImportJobService;
 use App\Service\PdfService;
 use App\Service\RepositorioDocumentalService;
 
@@ -397,13 +398,25 @@ try {
             if (!is_uploaded_file($_FILES['csv_file']['tmp_name'])) {
                 $respond(['success' => false, 'error' => 'Invalid upload'], 400);
             }
-            $respond(CsvService::importCSV(
+            $queued = (new ImportJobService())->enqueue(
                 $_FILES['csv_file']['tmp_name'],
+                (string) ($_FILES['csv_file']['name'] ?? 'import.csv'),
                 $year,
                 SecurityContext::getCurrentUserId() ?? 0,
                 RequestContext::getClientIp(),
                 RequestContext::getClientHostname()
-            ));
+            );
+            CsvService::logHistory(
+                'Importación CSV',
+                "Trabajo #{$queued['id']} encolado vía API para el año {$year}."
+            );
+            $respond([
+                'success' => true,
+                'message' => 'Importación encolada para procesamiento asíncrono.',
+                'job_id' => $queued['id'],
+                'rows' => $queued['rows'],
+                'status' => 'PENDIENTE',
+            ], 202);
             break;
 
         case 'validate_csv':

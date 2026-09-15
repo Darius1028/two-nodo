@@ -1,9 +1,11 @@
 {
   "name": "institucion/record-academico",
   "description": "Sistema de Registro Académico - Doctrine + SQL Server + Keycloak",
+  "license": "proprietary",
   "type": "project",
   "require": {
     "php": ">=8.2",
+    "aws/aws-sdk-php": "^3.356",
     "ext-curl": "*",
     "ext-fileinfo": "*",
     "ext-iconv": "*",

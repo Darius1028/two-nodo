@@ -11,6 +11,16 @@ use FPDF;
 
 class InEFPDF extends FPDF
 {
+    public function __construct(
+        string $orientation = 'P',
+        string $unit = 'mm',
+        string|array $size = 'A4',
+        private readonly ?string $letterheadPath = null,
+        private readonly ?string $signaturePath = null
+    ) {
+        parent::__construct($orientation, $unit, $size);
+    }
+
     public function Footer(): void
     {
         $this->SetY(-15);
@@ -21,15 +31,13 @@ class InEFPDF extends FPDF
 
     public function addLetterhead(): void
     {
-        $pathPng = __DIR__ . '/../../public/assets/letterhead.png';
-        if (file_exists($pathPng)) {
-            $this->Image($pathPng, 0, 0, 210);
+        if ($this->letterheadPath !== null && is_readable($this->letterheadPath)) {
+            $this->Image($this->letterheadPath, 0, 0, 210);
         }
     }
 
     public function addSignature(): void
     {
-        $pathPng = __DIR__ . '/../../public/assets/signature.png';
         $sigWidth = 90;
         $x = ($this->GetPageWidth() - $sigWidth) / 2;
 
@@ -41,8 +49,8 @@ class InEFPDF extends FPDF
 
         $this->SetAutoPageBreak(false);
         $y = $this->GetY();
-        if (file_exists($pathPng)) {
-            $this->Image($pathPng, $x, $y, $sigWidth, 0);
+        if ($this->signaturePath !== null && is_readable($this->signaturePath)) {
+            $this->Image($this->signaturePath, $x, $y, $sigWidth, 0);
         }
         $this->SetAutoPageBreak(true, 25);
     }
@@ -104,11 +112,21 @@ class PdfService
     private array $columnSchema;
     private ?RepositorioDocumentalService $repositorioDocumentalService;
 
-    public function __construct(?RepositorioDocumentalService $repositorioDocumentalService = null)
+    public function __construct(
+        ?RepositorioDocumentalService $repositorioDocumentalService = null,
+        ?AssetStorageService $assetStorageService = null
+    )
     {
         $this->qrEnabled = ConfigService::isQrEnabled();
         $this->columnSchema = ConfigService::getColumnSchema();
-        $this->pdf = new InEFPDF('P', 'mm', 'A4');
+        $assetStorageService ??= new AssetStorageService();
+        $this->pdf = new InEFPDF(
+            'P',
+            'mm',
+            'A4',
+            $assetStorageService->resolveLocalPath('letterhead'),
+            $assetStorageService->resolveLocalPath('signature')
+        );
         $this->pdf->AliasNbPages();
         $this->pdf->SetAutoPageBreak(true, 25);
         $this->repositorioDocumentalService = $repositorioDocumentalService;

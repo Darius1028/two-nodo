@@ -1,0 +1,4 @@
+Proceso,Curso,Grupo Objetivo,Modalidad,Nro. de Horas,Fecha Inicio,Facha Fin,Cedula,Nombre,Apellido,Email,Genero,Tipo,Cargo,Provincia,Total,Aprueba,Año
+Formación Continua,Gestión Documental y Archivo,Personal administrativo,Virtual,20,2026-09-01,2026-09-05,9990000001,Ana,Prueba,ana.prueba@example.com,Femenino,Servidor público,Analista,Pichincha,95,SI,2026
+Formación Continua,Seguridad de la Información,Personal técnico,Presencial,24,2026-09-08,2026-09-12,9990000002,Bruno,Ejemplo,bruno.ejemplo@example.com,Masculino,Servidor público,Técnico,Guayas,88,SI,2026
+Formación Continua,Atención y Servicio a la Ciudadanía,Personal de atención,Híbrida,16,2026-09-15,2026-09-18,9990000003,Carla,Demostración,carla.demostracion@example.com,Femenino,Servidor público,Asistente,Azuay,92,SI,2026

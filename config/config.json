@@ -46,5 +46,23 @@
             "width": 10,
             "visible": true
         }
-    ]
+    ],
+    "letterhead_asset": {
+        "bucket": "record-academico-assets",
+        "key": "assets\/letterhead\/e639cc3b84238183fd4dee0185d719f863144889d20c8ceac28284e2082dec4d.png",
+        "versionId": "2bb0f862-4693-426d-9644-02beb8a935c7",
+        "etag": "c9a96361f6f82525c46a997b500f9dd7",
+        "sha256": "e639cc3b84238183fd4dee0185d719f863144889d20c8ceac28284e2082dec4d",
+        "size": 398904,
+        "contentType": "image\/png"
+    },
+    "signature_asset": {
+        "bucket": "record-academico-assets",
+        "key": "assets\/signature\/3f16415e430dedab2fa08f7e013934ec63be42369b4039a670927a0066ae7c3c.png",
+        "versionId": "06499185-78bf-4bb0-b1f7-ac4a5b3c97d9",
+        "etag": "7a4055f11453396f9f472b05be85efc2",
+        "sha256": "3f16415e430dedab2fa08f7e013934ec63be42369b4039a670927a0066ae7c3c",
+        "size": 95706,
+        "contentType": "image\/png"
+    }
 }
