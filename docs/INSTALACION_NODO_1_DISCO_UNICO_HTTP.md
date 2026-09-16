@@ -43,10 +43,17 @@ ruta por la ubicación real:
 cd /ruta/al/proyecto
 ```
 
-Las direcciones `10.1.13.81` y `10.1.13.82` son ejemplos. Reemplace también
-todos los valores entre `<...>` antes de ejecutar comandos o iniciar servicios.
-Esta guía supone una instalación nueva; no sobrescriba archivos `.env` ni
-reutilice directorios de datos de una instalación existente.
+Esta instalación usa las siguientes direcciones, que están en subredes
+distintas y deben tener enrutamiento entre sí:
+
+| Nodo | Hostname | IP |
+| --- | --- | --- |
+| 1 | `pchquit01dweb14.fj.local` | `10.1.13.51` |
+| 2 | `pchquit01dweb14.fj.local-02` | `10.11.244.157` |
+
+Reemplace todos los valores entre `<...>` antes de ejecutar comandos o iniciar
+servicios. Esta guía supone una instalación nueva; no sobrescriba archivos
+`.env` ni reutilice directorios de datos de una instalación existente.
 
 ## 2. Hostname y conectividad
 
@@ -57,18 +64,27 @@ sudo hostnamectl set-hostname pchquit01dweb14.fj.local
 sudo nano /etc/hosts
 ```
 
-Añada las IP reales de ambos nodos:
+Asegure que DNS interno resuelva ambos nombres en los dos servidores. Como
+respaldo, añada estas entradas en `/etc/hosts` de **ambos** nodos:
 
 ```text
-10.1.13.81 pchquit01dweb14.fj.local
-10.1.13.82 pchquit01dweb14.fj.local-02
+10.1.13.51    pchquit01dweb14.fj.local
+10.11.244.157 pchquit01dweb14.fj.local-02
 ```
 
-Compruebe la resolución:
+Compruebe la resolución y la conectividad bidireccional. Ejecute las pruebas
+remotas desde cada nodo (no confunda el ping al propio hostname con una prueba
+entre nodos):
 
 ```bash
 getent hosts pchquit01dweb14.fj.local
 getent hosts pchquit01dweb14.fj.local-02
+
+# Nodo 1
+ping -c 3 pchquit01dweb14.fj.local-02
+
+# Nodo 2
+ping -c 3 pchquit01dweb14.fj.local
 ```
 
 Configure el firewall de acuerdo con esta conectividad:
@@ -79,6 +95,32 @@ Configure el firewall de acuerdo con esta conectividad:
 | TCP 8010 | Desde el balanceador hacia la aplicación |
 | TCP 1433 o el configurado | Desde la aplicación hacia SQL Server |
 | Puertos de los servicios externos | Desde la aplicación hacia Keycloak, roles y Repositorio Documental |
+
+El puerto TCP `9000` es imprescindible en los dos sentidos; ICMP/ping correcto
+no demuestra que esté permitido. En el nodo 2 se usa UFW con política de
+entrada `deny`, por lo que agregue una regla restringida al nodo 1:
+
+```bash
+# Nodo 2: permitir MinIO desde el nodo 1, sin exponerlo a otras redes.
+sudo ufw allow proto tcp from 10.1.13.51 to any port 9000
+sudo ufw status numbered
+```
+
+Si el nodo 1 también tiene firewall de entrada restrictivo, permita de forma
+equivalente TCP `9000` desde `10.11.244.157`. Cuando MinIO esté arriba en los
+dos nodos, compruebe el puerto desde ambos sentidos:
+
+```bash
+# Nodo 1
+nc -vz pchquit01dweb14.fj.local-02 9000
+
+# Nodo 2
+nc -vz pchquit01dweb14.fj.local 9000
+```
+
+Ambos comandos deben indicar `succeeded` o `Connected`. Un `TIMEOUT`,
+`no route to host` en los logs de MinIO o un ping exitoso con TCP fallido
+indican una regla de firewall o ACL de red pendiente.
 
 MinIO por HTTP no cifra los datos en tránsito. Este procedimiento supone una
 red privada controlada. La consola se mantiene en `127.0.0.1:9001`.
@@ -185,14 +227,32 @@ sudo docker compose \
 Con ambos nodos iniciados:
 
 ```bash
-curl -fsS -o /dev/null -w '%{http_code}\n' http://pchquit01dweb14.fj.local:9000/minio/health/live
-curl -fsS -o /dev/null -w '%{http_code}\n' http://pchquit01dweb14.fj.local:9000/minio/health/cluster
-curl -fsS -o /dev/null -w '%{http_code}\n' http://pchquit01dweb14.fj.local-02:9000/minio/health/cluster
+# En cada nodo: comprueba que su proceso responde.
+curl -i --max-time 5 http://127.0.0.1:9000/minio/health/live
+
+# En cualquiera de los nodos: comprueba que el clúster puede leer.
+curl -i --max-time 5 http://127.0.0.1:9000/minio/health/cluster/read
+
+# Comprueba los dos endpoints por nombre.
+curl -i --max-time 5 http://pchquit01dweb14.fj.local:9000/minio/health/cluster/read
+curl -i --max-time 5 http://pchquit01dweb14.fj.local-02:9000/minio/health/cluster/read
 ```
 
-Espere HTTP `200`. Si MinIO rechaza los directorios por compartir disco o no
-obtiene quorum, no continúe con producción: revise los logs y la topología.
-Un preflight exitoso no sustituye esta comprobación.
+Espere `HTTP/1.1 200 OK` en todas las pruebas. Después revise los logs recientes
+en ambos nodos:
+
+```bash
+sudo docker logs --since 2m academic_minio_distributed
+```
+
+No deben persistir `i/o timeout`, `no route to host`, `drive not found` ni
+`Waiting for a minimum of 2 drives`. Durante la primera formación pueden
+aparecer mensajes transitorios sobre `pool.bin` o `rebalance.bin`; sólo son
+aceptables si el arranque posterior informa `All MinIO sub-systems initialized
+successfully` y las comprobaciones HTTP devuelven 200. Si MinIO rechaza los
+directorios por compartir disco o no obtiene quorum, no continúe con
+producción: revise los logs y la topología. Un preflight exitoso no sustituye
+esta comprobación.
 
 ## 7. Preparar la base de datos compartida
 
@@ -248,16 +308,16 @@ DB_USER=<USUARIO_APP>
 DB_PASS='<CONTRASEÑA>'
 DB_ENCRYPT=true
 
-APP_RECORD_01_IP=10.1.13.81
-APP_RECORD_02_IP=10.1.13.82
+APP_RECORD_01_IP=10.1.13.51
+APP_RECORD_02_IP=10.11.244.157
 
 STORAGE_DRIVER=s3
 MINIO_ENDPOINT=http://pchquit01dweb14.fj.local:9000
 MINIO_REGION=us-east-1
 MINIO_IMPORT_BUCKET=record-academico-imports
 MINIO_ASSET_BUCKET=record-academico-assets
-MINIO_ACCESS_KEY=<CLAVE_RUNTIME>
-MINIO_SECRET_KEY='<SECRETO_RUNTIME>'
+MINIO_ACCESS_KEY=academic_app
+MINIO_SECRET_KEY='una-clave-local-segura'
 MINIO_PATH_STYLE=true
 MINIO_TLS_VERIFY=false
 MINIO_IMPORT_EXPIRATION_DAYS=7
@@ -275,6 +335,13 @@ RATE_LIMIT_FAIL_OPEN=false
 TRUSTED_PROXIES=<IP_O_CIDR_DEL_BALANCEADOR>
 KEYCLOAK_REDIRECT_URI=https://<DOMINIO_PUBLICO>/callback.php
 ```
+
+`MINIO_ACCESS_KEY=academic_app` es la cuenta de runtime que usará PHP y el
+worker; no es la cuenta root definida en
+`/etc/academic-minio/secrets/root-user`. Cree esta cuenta y asígnele permisos
+limitados a los buckets de imports y assets. `una-clave-local-segura` es un
+valor inicial para esta instalación: reemplácelo por un secreto único antes de
+exponer el entorno fuera de una red controlada.
 
 `http://` selecciona el protocolo. `MINIO_TLS_VERIFY=false` por sí solo no
 convierte una conexión HTTPS en HTTP. No use `http://minio:9000`, que corresponde
@@ -307,7 +374,10 @@ dc build php-app
 ```
 
 Inicialice los buckets una sola vez con credenciales de aprovisionamiento.
-El siguiente comando las solicita temporalmente sin escribirlas en `.env`:
+El siguiente comando solicita temporalmente las credenciales root definidas en
+`root-user` y `root-password`, sin escribirlas en `.env`. Sólo durante este
+comando sustituyen a `academic_app` y su secreto; al terminar, `.env` continúa
+siendo la fuente de credenciales runtime para PHP y el worker:
 
 ```bash
 read -r -p "Usuario de aprovisionamiento MinIO: " MINIO_ACCESS_KEY
