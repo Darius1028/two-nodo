@@ -16,7 +16,7 @@ del contenedor.
        ┌────────▼─────────┐       ┌─────────▼────────┐
        │ Servidor 1       │       │ Servidor 2       │
        │ app + worker     │       │ app + worker     │
-       │ MinIO app-record-01 │◄──►│ MinIO app-record-02 │
+       │ MinIO pchquit01dweb14.fj.local │◄──►│ MinIO pchquit01dweb14.fj.local-02 │
        │ discos 1..4      │       │ discos 1..4      │
        └────────┬─────────┘       └─────────┬────────┘
                 └─────────────┬─────────────┘
@@ -93,7 +93,7 @@ Requisitos físicos y de red:
   mismo disco no proporcionan tolerancia y el preflight las rechaza.
 - Montajes exclusivos y estables, preferentemente XFS, por ejemplo
   `/mnt/minio/disk1` hasta `/mnt/minio/disk4`.
-- Los hostnames `app-record-01` y `app-record-02` deben resolver en ambos
+- Los hostnames `pchquit01dweb14.fj.local` y `pchquit01dweb14.fj.local-02` deben resolver en ambos
   servidores mediante DNS interno o `/etc/hosts`; el puerto TCP 9000 debe estar
   permitido en ambos sentidos entre los servidores y desde el
   balanceador/aplicación.
@@ -105,7 +105,7 @@ Requisitos físicos y de red:
   la caída de uno de los dos servidores.
 - Certificado TLS en `/etc/academic-minio/certs/public.crt`, su clave en
   `private.key` y la CA emisora dentro de `CAs/`. El certificado de cada host
-  debe incluir `app-record-01` o `app-record-02` en sus SAN.
+  debe incluir `pchquit01dweb14.fj.local` o `pchquit01dweb14.fj.local-02` en sus SAN.
 - Archivos `/etc/academic-minio/secrets/root-user` y `root-password` con el
   mismo contenido en ambos hosts y permisos `0600`. Compose los monta como
   secretos; la credencial no queda en `minio.env` ni en `docker inspect`.
@@ -117,25 +117,25 @@ en `/etc/hosts` (reemplace las IP por las reales de los nodos):
 ```bash
 # Nodo 1
 su -
-hostnamectl set-hostname "app-record-01" && exec bash
+hostnamectl set-hostname "pchquit01dweb14.fj.local" && exec bash
 
 # Nodo 2
 su -
-hostnamectl set-hostname "app-record-02" && exec bash
+hostnamectl set-hostname "pchquit01dweb14.fj.local-02" && exec bash
 ```
 
 En **ambos** nodos, agregue estas entradas a `/etc/hosts`:
 
 ```text
-10.1.13.81  app-record-01
-10.1.13.82  app-record-02
+10.1.13.81  pchquit01dweb14.fj.local
+10.1.13.82  pchquit01dweb14.fj.local-02
 ```
 
 Compruebe la resolución antes de seguir:
 
 ```bash
-getent hosts app-record-01
-getent hosts app-record-02
+getent hosts pchquit01dweb14.fj.local
+getent hosts pchquit01dweb14.fj.local-02
 ```
 
 Los contenedores Docker no heredan automáticamente estas entradas de
@@ -149,7 +149,7 @@ APP_RECORD_02_IP=10.1.13.82
 
 Al arrancar los contenedores aplique el override, que sólo replica la
 resolución de nombres dentro de PHP y el worker; `MINIO_ENDPOINT` sigue usando
-`app-record-01` o `app-record-02`, no una IP:
+`pchquit01dweb14.fj.local` o `pchquit01dweb14.fj.local-02`, no una IP:
 
 ```bash
 docker compose \
@@ -163,8 +163,8 @@ Prepare `minio.env` en cada host. Todos los valores coinciden salvo
 
 ```bash
 cp deploy/minio-two-node/minio.env.example deploy/minio-two-node/minio.env
-# servidor 1: MINIO_NODE_NAME=app-record-01
-# servidor 2: MINIO_NODE_NAME=app-record-02
+# servidor 1: MINIO_NODE_NAME=pchquit01dweb14.fj.local
+# servidor 2: MINIO_NODE_NAME=pchquit01dweb14.fj.local-02
 deploy/minio-two-node/preflight.sh deploy/minio-two-node/minio.env
 ```
 
@@ -179,8 +179,8 @@ docker compose \
 
 Con un F5/VIP, configure el mismo endpoint en ambos servidores, por ejemplo
 `MINIO_ENDPOINT=https://minio.interno.example`. Sin balanceador S3, configure
-`https://app-record-01:9000` en la aplicación del servidor 1 y
-`https://app-record-02:9000` en la del servidor 2. Son URLs diferentes hacia
+`https://pchquit01dweb14.fj.local:9000` en la aplicación del servidor 1 y
+`https://pchquit01dweb14.fj.local-02:9000` en la del servidor 2. Son URLs diferentes hacia
 el mismo clúster; cuando cae un servidor también cae la aplicación que apunta a
 su MinIO local.
 
@@ -223,7 +223,7 @@ servicio S3 compatible sin cambiar el código.
 STORAGE_DRIVER=s3
 # Con F5/VIP: el mismo valor en ambos nodos.
 MINIO_ENDPOINT=https://minio.interno.example
-# Sin F5/VIP: use app-record-01 en el servidor 1 y app-record-02 en el servidor 2.
+# Sin F5/VIP: use pchquit01dweb14.fj.local en el servidor 1 y pchquit01dweb14.fj.local-02 en el servidor 2.
 MINIO_REGION=us-east-1
 MINIO_IMPORT_BUCKET=record-academico-imports
 MINIO_ASSET_BUCKET=record-academico-assets

@@ -12,13 +12,13 @@ esta topología como alta disponibilidad de almacenamiento.
 
 ## Inicio
 
-En cada nodo, configure los hostnames `app-record-01` y `app-record-02`, TLS,
+En cada nodo, configure los hostnames `pchquit01dweb14.fj.local` y `pchquit01dweb14.fj.local-02`, TLS,
 las credenciales de MinIO y las rutas persistentes. Cree las rutas antes de
 iniciar el servicio.
 
 ```bash
 cp minio.single-disk.env.example minio.single-disk.env
-# En nodo 2 establezca MINIO_NODE_NAME=app-record-02.
+# En nodo 2 establezca MINIO_NODE_NAME=pchquit01dweb14.fj.local-02.
 mkdir -p /var/lib/academic-minio/data1 /var/lib/academic-minio/data2
 ./preflight-single-disk.sh minio.single-disk.env
 docker compose --env-file minio.single-disk.env -f compose-single-disk.yml up -d

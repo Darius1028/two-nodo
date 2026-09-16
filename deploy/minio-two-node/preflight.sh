@@ -47,15 +47,15 @@ root_password="$(<"${MINIO_ROOT_PASSWORD_FILE}")"
 unset root_password
 
 case "${MINIO_NODE_NAME}" in
-    app-record-01|app-record-02) ;;
-    *) fail "MINIO_NODE_NAME debe ser app-record-01 o app-record-02." ;;
+    pchquit01dweb14.fj.local|pchquit01dweb14.fj.local-02) ;;
+    *) fail "MINIO_NODE_NAME debe ser pchquit01dweb14.fj.local o pchquit01dweb14.fj.local-02." ;;
 esac
 
 host_shortname="$(hostname -s)"
 [[ "${host_shortname}" == "${MINIO_NODE_NAME}" ]] \
     || fail "El hostname local (${host_shortname}) no coincide con MINIO_NODE_NAME (${MINIO_NODE_NAME})."
 
-for cluster_host in app-record-01 app-record-02; do
+for cluster_host in pchquit01dweb14.fj.local pchquit01dweb14.fj.local-02; do
     getent hosts "${cluster_host}" >/dev/null \
         || fail "${cluster_host} no resuelve. Configure DNS interno o /etc/hosts en ambos nodos."
 done

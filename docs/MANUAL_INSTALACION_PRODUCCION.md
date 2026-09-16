@@ -24,8 +24,8 @@ trazabilidad: el valor de `hostname` se registra como `nodo` en
 ## 2. Requisitos previos
 
 - Dos servidores Linux con Docker Engine y Docker Compose v2.
-- Hostnames distintos y estables; por ejemplo `app-record-01` y
-  `app-record-02`.
+- Hostnames distintos y estables; por ejemplo `pchquit01dweb14.fj.local` y
+  `pchquit01dweb14.fj.local-02`.
 - Un balanceador/VIP para la aplicación y, preferentemente, otro endpoint VIP
   para S3/MinIO.
 - SQL Server compartido, con TLS y respaldos operativos.
@@ -43,22 +43,22 @@ Asigne el hostname una vez por host, si aún no está configurado:
 
 ```bash
 su -
-hostnamectl set-hostname "app-record-01" && exec bash
+hostnamectl set-hostname "pchquit01dweb14.fj.local" && exec bash
 ```
 
-En el segundo host ejecute el mismo comando usando `app-record-02`. Después,
+En el segundo host ejecute el mismo comando usando `pchquit01dweb14.fj.local-02`. Después,
 en **ambos** servidores, configure `/etc/hosts` con las IP reales:
 
 ```text
-10.1.13.81  app-record-01
-10.1.13.82  app-record-02
+10.1.13.81  pchquit01dweb14.fj.local
+10.1.13.82  pchquit01dweb14.fj.local-02
 ```
 
 Reemplace esas IP por las correspondientes a los nodos del clúster y confirme:
 
 ```bash
-getent hosts app-record-01
-getent hosts app-record-02
+getent hosts pchquit01dweb14.fj.local
+getent hosts pchquit01dweb14.fj.local-02
 ```
 
 Como Docker no copia automáticamente el `/etc/hosts` del servidor dentro de
@@ -92,7 +92,7 @@ cp deploy/minio-two-node/minio.env.example deploy/minio-two-node/minio.env
 ```
 
 Los dos archivos comparten IPs, discos, certificados y secretos; sólo cambia
-`MINIO_NODE_NAME` (`app-record-01` en el primer host y `app-record-02` en el
+`MINIO_NODE_NAME` (`pchquit01dweb14.fj.local` en el primer host y `pchquit01dweb14.fj.local-02` en el
 segundo).
 Ejecute el preflight en cada servidor:
 

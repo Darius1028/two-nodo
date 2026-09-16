@@ -53,22 +53,22 @@ reutilice directorios de datos de una instalación existente.
 Configure el nodo 1:
 
 ```bash
-sudo hostnamectl set-hostname app-record-01
+sudo hostnamectl set-hostname pchquit01dweb14.fj.local
 sudo nano /etc/hosts
 ```
 
 Añada las IP reales de ambos nodos:
 
 ```text
-10.1.13.81 app-record-01
-10.1.13.82 app-record-02
+10.1.13.81 pchquit01dweb14.fj.local
+10.1.13.82 pchquit01dweb14.fj.local-02
 ```
 
 Compruebe la resolución:
 
 ```bash
-getent hosts app-record-01
-getent hosts app-record-02
+getent hosts pchquit01dweb14.fj.local
+getent hosts pchquit01dweb14.fj.local-02
 ```
 
 Configure el firewall de acuerdo con esta conectividad:
@@ -136,7 +136,7 @@ nano deploy/minio-two-node/minio.single-disk.env
 Contenido para el nodo 1:
 
 ```dotenv
-MINIO_NODE_NAME=app-record-01
+MINIO_NODE_NAME=pchquit01dweb14.fj.local
 MINIO_CLUSTER_SCHEME=http
 MINIO_CERTS_DIR=/etc/academic-minio/certs
 MINIO_CONSOLE_ADDRESS=127.0.0.1:9001
@@ -163,11 +163,11 @@ sudo docker compose \
 ```
 
 **Dependencia del nodo 2:** prepare e inicie MinIO en el segundo servidor
-durante la misma ventana. Use el hostname `app-record-02`, las mismas entradas
+durante la misma ventana. Use el hostname `pchquit01dweb14.fj.local-02`, las mismas entradas
 de resolución y credenciales, y cambie en su archivo de configuración:
 
 ```dotenv
-MINIO_NODE_NAME=app-record-02
+MINIO_NODE_NAME=pchquit01dweb14.fj.local-02
 ```
 
 El nodo 1 solo no reúne quorum para inicializar el clúster. Revise estado y logs:
@@ -185,9 +185,9 @@ sudo docker compose \
 Con ambos nodos iniciados:
 
 ```bash
-curl -fsS -o /dev/null -w '%{http_code}\n' http://app-record-01:9000/minio/health/live
-curl -fsS -o /dev/null -w '%{http_code}\n' http://app-record-01:9000/minio/health/cluster
-curl -fsS -o /dev/null -w '%{http_code}\n' http://app-record-02:9000/minio/health/cluster
+curl -fsS -o /dev/null -w '%{http_code}\n' http://pchquit01dweb14.fj.local:9000/minio/health/live
+curl -fsS -o /dev/null -w '%{http_code}\n' http://pchquit01dweb14.fj.local:9000/minio/health/cluster
+curl -fsS -o /dev/null -w '%{http_code}\n' http://pchquit01dweb14.fj.local-02:9000/minio/health/cluster
 ```
 
 Espere HTTP `200`. Si MinIO rechaza los directorios por compartir disco o no
@@ -252,7 +252,7 @@ APP_RECORD_01_IP=10.1.13.81
 APP_RECORD_02_IP=10.1.13.82
 
 STORAGE_DRIVER=s3
-MINIO_ENDPOINT=http://app-record-01:9000
+MINIO_ENDPOINT=http://pchquit01dweb14.fj.local:9000
 MINIO_REGION=us-east-1
 MINIO_IMPORT_BUCKET=record-academico-imports
 MINIO_ASSET_BUCKET=record-academico-assets
@@ -396,7 +396,7 @@ Verifique:
 
 Cuando la aplicación del nodo 2 esté desplegada, compruebe continuidad de sesión
 al alternar nodos y procesamiento desde un nodo de archivos cargados por el
-otro. En ese servidor puede usar `MINIO_ENDPOINT=http://app-record-02:9000`:
+otro. En ese servidor puede usar `MINIO_ENDPOINT=http://pchquit01dweb14.fj.local-02:9000`:
 ambos endpoints deben pertenecer al mismo clúster.
 
 ## Referencias del proyecto
