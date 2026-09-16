@@ -51,7 +51,7 @@ case "${MINIO_NODE_NAME}" in
     *) fail "MINIO_NODE_NAME debe ser pchquit01dweb14.fj.local o pchquit01dweb14.fj.local-02." ;;
 esac
 
-host_shortname="$(hostname -s)"
+host_shortname="$(hostnamectl --static)"
 [[ "${host_shortname}" == "${MINIO_NODE_NAME}" ]] \
     || fail "El hostname local (${host_shortname}) no coincide con MINIO_NODE_NAME (${MINIO_NODE_NAME})."
 

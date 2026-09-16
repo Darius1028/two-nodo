@@ -21,7 +21,7 @@ case "${MINIO_NODE_NAME}" in
     pchquit01dweb14.fj.local|pchquit01dweb14.fj.local-02) ;;
     *) fail "MINIO_NODE_NAME debe ser pchquit01dweb14.fj.local o pchquit01dweb14.fj.local-02." ;;
 esac
-[[ "$(hostname -s)" == "${MINIO_NODE_NAME}" ]] || fail "El hostname local no coincide con MINIO_NODE_NAME."
+[[ "$(hostnamectl --static)" == "${MINIO_NODE_NAME}" ]] || fail "El hostname local no coincide con MINIO_NODE_NAME."
 
 for cluster_host in pchquit01dweb14.fj.local pchquit01dweb14.fj.local-02; do
     getent hosts "${cluster_host}" >/dev/null || fail "${cluster_host} no resuelve."
