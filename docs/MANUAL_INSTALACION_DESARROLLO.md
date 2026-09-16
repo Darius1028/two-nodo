@@ -1,14 +1,16 @@
-# Manual de instalación — Desarrollo
+# Manual de instalación — Desarrollo local con MinIO
 
 ## 1. Propósito
 
 Esta guía prepara una instancia local de un solo nodo para desarrollar y probar
-el Sistema de Registro Académico. Usa Docker Compose para Nginx, PHP-FPM y el
-worker de importaciones. SQL Server, Keycloak y el Repositorio Documental
-pueden ser servicios de desarrollo ya disponibles en la red institucional.
+el Sistema de Registro Académico. Usa Docker Compose para Nginx, PHP-FPM, el
+worker de importaciones y MinIO local. SQL Server, Keycloak y el Repositorio
+Documental pueden ser servicios de desarrollo ya disponibles en la red
+institucional.
 
-> No use esta configuración para atender usuarios finales ni como nodo de un
-> despliegue multinodo.
+> Esta es una de las dos rutas de despliegue documentadas. Para los dos nodos
+> institucionales use exclusivamente la
+> [guía de disco único con HTTP](INSTALACION_NODO_1_DISCO_UNICO_HTTP.md).
 
 ## 2. Requisitos
 
@@ -70,7 +72,13 @@ CONFIG_STORAGE=file
 SECURITY_ALERT_STORAGE=file
 SESSION_HANDLER=file
 RATE_LIMIT_STORE=file
-STORAGE_DRIVER=local
+STORAGE_DRIVER=s3
+MINIO_ENDPOINT=http://minio:9000
+MINIO_TLS_VERIFY=false
+MINIO_ACCESS_KEY=<clave-local>
+MINIO_SECRET_KEY=<secreto-local-de-al-menos-8-caracteres>
+MINIO_IMPORT_BUCKET=record-academico-imports
+MINIO_ASSET_BUCKET=record-academico-assets
 ```
 
 Si Keycloak está fuera de tu equipo, debe permitir exactamente la URI indicada
@@ -79,21 +87,18 @@ o CIDR de confianza a `TRUSTED_PROXIES`; no uses un valor abierto.
 
 ## 4. Base de datos de desarrollo
 
-En una base vacía, aplique el esquema base con el cliente SQL autorizado por
-tu entorno. El script es idempotente:
+En una base vacía, aplique el esquema base autorizado por tu entorno antes de
+arrancar la aplicación. Esta copia del repositorio no incluye un script de
+creación completo. No apuntes la instancia local a una base productiva: la
+aplicación puede crear, modificar, importar y marcar registros como
+eliminados.
+
+## 5. Arrancar MinIO y la aplicación
 
 ```bash
-sqlcmd -S <servidor> -d record_academico_db -U <usuario> \
-  -i database/create_schema.sql -b
-```
-
-No apuntes la instancia local a una base productiva. La aplicación puede crear,
-modificar, importar y marcar registros como eliminados.
-
-## 5. Arrancar la aplicación
-
-```bash
-docker compose up -d --build
+docker compose --profile local-infra up -d --build minio
+docker compose --profile local-infra run --rm storage-init
+docker compose --profile local-infra up -d php-app import-worker nginx
 docker compose ps
 ```
 
@@ -116,32 +121,11 @@ curl -i http://localhost:8010/health/ready
 `/health/live` confirma que Nginx responde. `/health/ready` además valida los
 servicios requeridos por la configuración seleccionada.
 
-## 6. Opcional: probar MinIO local
+La consola de MinIO queda ligada sólo a `127.0.0.1:9001`; no se expone a la
+red. `storage-init` crea los buckets y su configuración inicial de forma
+idempotente.
 
-Usa esta opción para probar la ruta S3 sin depender de infraestructura externa.
-Actualiza temporalmente `.env`:
-
-```dotenv
-STORAGE_DRIVER=s3
-MINIO_ENDPOINT=http://minio:9000
-MINIO_TLS_VERIFY=false
-MINIO_ACCESS_KEY=<clave-local>
-MINIO_SECRET_KEY=<secreto-local-de-al-menos-8-caracteres>
-MINIO_IMPORT_BUCKET=record-academico-imports
-MINIO_ASSET_BUCKET=record-academico-assets
-```
-
-Después inicia MinIO e inicializa los buckets:
-
-```bash
-docker compose --profile local-infra up -d --build minio
-docker compose --profile local-infra run --rm storage-init
-docker compose --profile local-infra up -d php-app import-worker nginx
-```
-
-La consola de MinIO queda ligada sólo a `127.0.0.1:9001`.
-
-## 7. Verificación funcional
+## 6. Verificación funcional
 
 1. Abre `http://localhost:8010` e inicia sesión con un usuario de pruebas.
 2. Confirma que un administrador llega a `AdminPanel.php` y un secretario a
@@ -152,7 +136,7 @@ La consola de MinIO queda ligada sólo a `127.0.0.1:9001`.
 5. Genera un PDF con datos no sensibles. Si está configurado el Repositorio
    Documental de pruebas, comprueba también su archivado.
 
-## 8. Comandos habituales
+## 7. Comandos habituales
 
 ```bash
 # Abrir una terminal en PHP-FPM
@@ -174,7 +158,7 @@ docker compose --profile local-infra down -v
 El último comando elimina los volúmenes Docker del perfil local, incluido el
 MinIO de pruebas. No lo ejecute contra infraestructura productiva.
 
-## 9. Antes de compartir cambios
+## 8. Antes de compartir cambios
 
 - Retira cualquier `var_dump()` / `die` de depuración, especialmente de
   `SecurityContext::hasRole()`.

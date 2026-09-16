@@ -110,14 +110,14 @@ final class RateLimiter
                 $count = 1;
                 $connection->executeStatement(
                     'INSERT INTO Academico.RateLimit (clave, contador, expiraEn, actualizadaEn)
-                     VALUES (:key, 1, DATEADD(SECOND, :window, SYSUTCDATETIME()), SYSUTCDATETIME())',
+                     VALUES (:key, 1, DATEADD(SECOND, CAST(:window AS INT), SYSUTCDATETIME()), SYSUTCDATETIME())',
                     ['key' => $counterKey, 'window' => max(1, $windowSeconds)]
                 );
             } elseif ($expires <= $now) {
                 $count = 1;
                 $connection->executeStatement(
                     'UPDATE Academico.RateLimit
-                     SET contador = 1, expiraEn = DATEADD(SECOND, :window, SYSUTCDATETIME()), actualizadaEn = SYSUTCDATETIME()
+                     SET contador = 1, expiraEn = DATEADD(SECOND, CAST(:window AS INT), SYSUTCDATETIME()), actualizadaEn = SYSUTCDATETIME()
                      WHERE clave = :key',
                     ['key' => $counterKey, 'window' => max(1, $windowSeconds)]
                 );

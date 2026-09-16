@@ -14,13 +14,17 @@ else
     exit 1
 fi
 
+# Este script está destinado al entorno local, cuya infraestructura incluye
+# MinIO y el inicializador idempotente de buckets.
+COMPOSE_LOCAL=("${COMPOSE[@]}" --profile local-infra)
+
 show_logs_on_error() {
     exit_code=$?
 
     echo
     echo "ERROR: la operación falló."
 
-    "${COMPOSE[@]}" logs --tail=100 2>/dev/null || true
+    "${COMPOSE_LOCAL[@]}" logs --tail=100 2>/dev/null || true
 
     exit "$exit_code"
 }
@@ -29,12 +33,30 @@ trap show_logs_on_error ERR
 
 mostrar_ayuda() {
     echo "Uso:"
-    echo "  $0 normal    Reconstruye php-app y reinicomocia conservando volúmenes."
-    echo "  $0 clean     Elimina contenedores, imágenes y volúmenes, y reconstruye todo."
+    echo "  $0 normal         Reconstruye la aplicación, conserva volúmenes e inicia MinIO local."
+    echo "  $0 clean [--yes]  Elimina contenedores, imágenes y volúmenes, y reconstruye todo."
     echo
     echo "También puedes ejecutar:"
     echo "  $0"
     echo "para mostrar el menú."
+}
+
+verificar_salud() {
+    echo
+    echo "Verificando disponibilidad..."
+    "${COMPOSE_LOCAL[@]}" exec -T php-app \
+        curl --fail --silent --show-error --retry 10 --retry-delay 1 \
+        http://nginx/health/live >/dev/null
+    "${COMPOSE_LOCAL[@]}" exec -T php-app \
+        curl --fail --silent --show-error --retry 10 --retry-delay 1 \
+        http://nginx/health/ready >/dev/null
+    echo "Health checks correctos."
+}
+
+inicializar_storage() {
+    echo
+    echo "Inicializando buckets de MinIO..."
+    "${COMPOSE_LOCAL[@]}" run --rm storage-init
 }
 
 seleccionar_opcion() {
@@ -79,27 +101,32 @@ reinicio_normal() {
     fi
 
     echo
-    echo "[1/4] Reconstruyendo imagen php-app..."
+    echo "[1/5] Reconstruyendo imagen php-app..."
 
-    "${COMPOSE[@]}" build php-app
+    "${COMPOSE_LOCAL[@]}" build php-app
 
     echo
-    echo "[2/4] Levantando o recreando servicios..."
+    echo "[2/5] Levantando o recreando servicios e infraestructura local..."
 
-    "${COMPOSE[@]}" up -d \
+    "${COMPOSE_LOCAL[@]}" up -d \
         --force-recreate \
-        --remove-orphans
+        --remove-orphans \
+        minio php-app import-worker nginx
 
     echo
-    echo "[3/4] Verificando contenedores..."
-
-    sleep 3
-    "${COMPOSE[@]}" ps
+    echo "[3/5] Configurando almacenamiento local..."
+    inicializar_storage
 
     echo
-    echo "[4/4] Mostrando últimos logs..."
+    echo "[4/5] Verificando contenedores..."
 
-    "${COMPOSE[@]}" logs --tail=30
+    "${COMPOSE_LOCAL[@]}" ps
+    verificar_salud
+
+    echo
+    echo "[5/5] Mostrando últimos logs..."
+
+    "${COMPOSE_LOCAL[@]}" logs --tail=30
 
     echo
     echo "=============================================="
@@ -109,6 +136,15 @@ reinicio_normal() {
 }
 
 limpieza_completa() {
+    if [[ "${CONFIRM_CLEAN:-}" != "--yes" ]]; then
+        echo "ADVERTENCIA: se eliminarán los volúmenes locales, incluidos los datos de MinIO."
+        read -r -p "Escribe ELIMINAR para continuar: " confirmacion
+        if [[ "$confirmacion" != "ELIMINAR" ]]; then
+            echo "Operación cancelada."
+            return 0
+        fi
+    fi
+
     echo "=============================================="
     echo " Limpieza completa"
     echo " Proyecto: sistema-record-academico"
@@ -122,35 +158,40 @@ limpieza_completa() {
     fi
 
     echo
-    echo "[1/5] Eliminando contenedores, imágenes y volúmenes..."
+    echo "[1/6] Eliminando contenedores, imágenes y volúmenes..."
 
-    "${COMPOSE[@]}" down \
+    "${COMPOSE_LOCAL[@]}" down \
         --volumes \
         --remove-orphans \
         --rmi all
 
     echo
-    echo "[2/5] Reconstruyendo imágenes sin caché..."
+    echo "[2/6] Reconstruyendo imágenes sin caché..."
 
-    "${COMPOSE[@]}" build --no-cache
+    "${COMPOSE_LOCAL[@]}" build --no-cache php-app
 
     echo
-    echo "[3/5] Levantando nuevamente los servicios..."
+    echo "[3/6] Levantando nuevamente los servicios e infraestructura local..."
 
-    "${COMPOSE[@]}" up -d \
+    "${COMPOSE_LOCAL[@]}" up -d \
         --force-recreate \
-        --remove-orphans
+        --remove-orphans \
+        minio php-app import-worker nginx
 
     echo
-    echo "[4/5] Verificando contenedores..."
-
-    sleep 5
-    "${COMPOSE[@]}" ps
+    echo "[4/6] Configurando almacenamiento local..."
+    inicializar_storage
 
     echo
-    echo "[5/5] Mostrando últimos logs..."
+    echo "[5/6] Verificando contenedores..."
 
-    "${COMPOSE[@]}" logs --tail=50
+    "${COMPOSE_LOCAL[@]}" ps
+    verificar_salud
+
+    echo
+    echo "[6/6] Mostrando últimos logs..."
+
+    "${COMPOSE_LOCAL[@]}" logs --tail=50
 
     echo
     echo "=============================================="
@@ -160,6 +201,7 @@ limpieza_completa() {
 }
 
 MODO="${1:-}"
+CONFIRM_CLEAN="${2:-}"
 
 if [[ -z "$MODO" ]]; then
     seleccionar_opcion

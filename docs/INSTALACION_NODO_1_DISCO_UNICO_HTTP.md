@@ -139,8 +139,7 @@ pertenecer al mismo filesystem. Si el disco de datos está montado en otra ruta,
 cree allí los directorios y adapte `MINIO_DATA_1` y `MINIO_DATA_2`.
 
 El Compose exige el directorio `certs` aunque se use HTTP. Déjelo vacío en este
-despliegue. No convierta un clúster existente de ocho discos a este perfil
-reutilizando directamente sus datos.
+despliegue. No reutilice directorios de datos de otra instalación MinIO.
 
 ## 4. Credenciales administrativas de MinIO
 
@@ -471,10 +470,8 @@ ambos endpoints deben pertenecer al mismo clúster.
 
 ## Referencias del proyecto
 
-- [Manual de producción](MANUAL_INSTALACION_PRODUCCION.md).
-- [Perfil de disco único](../deploy/minio-two-node/SINGLE_DISK.md).
-- [Almacenamiento multinodo](ALMACENAMIENTO_MULTINODO.md).
+- [Desarrollo local con MinIO](MANUAL_INSTALACION_DESARROLLO.md).
 
-Esta guía adapta el perfil de disco único a HTTP privado. Los otros manuales
-incluyen ejemplos de TLS y de cuatro discos por servidor; no mezcle esos
-perfiles con los comandos de esta guía.
+Esta es la guía canónica para el despliegue de dos nodos con un disco por
+servidor y MinIO por HTTP privado. No mezcle sus comandos ni sus directorios de
+datos con otra topología de MinIO.

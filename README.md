@@ -2,9 +2,9 @@
 
 Sistema web para la gestión, consulta y certificación de registros académicos institucionales. Permite importar, administrar y exportar registros de estudiantes, generar PDFs certificados con QR de verificación, y expone una API REST completa. La autenticación se delega a Keycloak mediante OpenID Connect; la **autorización por roles se resuelve desde una base de datos institucional externa** (independiente de Keycloak).
 
-> **Estado del proyecto:** activo. El despliegue multinodo usa almacenamiento
-> S3/MinIO y estado compartido en SQL Server. Consulte la
-> [guía de despliegue en dos nodos](docs/ALMACENAMIENTO_MULTINODO.md).
+> **Estado del proyecto:** activo. Solo hay dos rutas de instalación
+> documentadas: [desarrollo local con MinIO](docs/MANUAL_INSTALACION_DESARROLLO.md)
+> y [dos nodos con un disco por servidor y HTTP privado](docs/INSTALACION_NODO_1_DISCO_UNICO_HTTP.md).
 
 ---
 
@@ -117,8 +117,6 @@ sistema-records/
 ├── config/
 │   ├── doctrine.php           # Configuración de Doctrine
 │   └── config.json            # Configuración de la aplicación
-├── database/
-│   └── create_schema.sql      # Script de creación de schemas y tablas (idempotente)
 ├── scripts/
 │   └── 20260914_minio_multinode.sql # Migración aditiva para dos nodos
 ├── bin/
@@ -126,12 +124,13 @@ sistema-records/
 │   ├── import-worker.php      # Worker de la cola compartida
 │   └── storage-init.php       # Buckets, versionado y lifecycle
 ├── docs/
-│   └── ALMACENAMIENTO_MULTINODO.md # Runbook de producción
+│   ├── MANUAL_INSTALACION_DESARROLLO.md # Desarrollo local con MinIO
+│   └── INSTALACION_NODO_1_DISCO_UNICO_HTTP.md # Dos nodos, un disco y HTTP privado
 ├── deploy/minio-two-node/
-│   ├── compose.yml          # Un miembro MinIO por servidor, pool compartido
-│   ├── minio.env.example    # Topología, discos y secretos por archivo
+│   ├── compose-single-disk.yml # Un miembro MinIO por servidor, pool compartido
+│   ├── minio.single-disk.env.example # Configuración del perfil de dos nodos
 │   ├── app.compose.yml      # Resuelve los hostnames del clúster dentro de Docker
-│   ├── preflight.sh         # Valida hostname, resolución, discos, TLS y Compose
+│   ├── preflight-single-disk.sh # Valida hostname, resolución y Compose
 │   └── check-cluster.sh     # Comprueba quorum de lectura/escritura
 ├── docker/
 │   ├── Dockerfile             # PHP 8.2-FPM con driver SQL Server
@@ -154,8 +153,9 @@ sistema-records/
 - Acceso de red a una instancia de **Microsoft SQL Server** (2016 o superior) para la base de datos principal.
 - Acceso de red a la base institucional **`PORTAL_APLICATIVOS_CJ`** (SQL Server) para resolución de roles.
 - Servidor **Keycloak** configurado con un realm y client para esta aplicación.
-- Para producción multinodo, cuatro discos dedicados por host para el clúster
-  **MinIO distribuido** y un **SQL Server compartido** accesible desde ambos.
+- Para dos nodos, un disco persistente por host para el clúster **MinIO
+  distribuido**, un **SQL Server compartido** accesible desde ambos y una red
+  privada entre los nodos.
 
 ---
 
@@ -229,15 +229,15 @@ Los roles **no** vienen del token de Keycloak. Se consultan en una base instituc
 
 #### MinIO/S3 y estado compartido
 
-MinIO es un servicio privado de la red de la aplicación. No se publica a
-Internet: los contenedores se conectan por HTTP mediante el nombre `minio`.
-El HTTPS público se termina en el proxy o servidor web de la aplicación y no
-requiere certificados `.key` ni CA en MinIO.
+Las configuraciones de MinIO dependen de la ruta elegida: en desarrollo el
+endpoint interno es `http://minio:9000`; en dos nodos se usa el hostname del
+miembro MinIO local por HTTP privado. El HTTPS público termina en el
+balanceador de la aplicación; MinIO no se publica a Internet.
 
 | Variable | Descripción | Valor de producción |
 |---|---|---|
-| `STORAGE_DRIVER` | Backend de objetos (`s3` o `local`) | `s3` |
-| `MINIO_ENDPOINT` | Endpoint interno de MinIO | `http://minio:9000` |
+| `STORAGE_DRIVER` | Backend de objetos | `s3` |
+| `MINIO_ENDPOINT` | Endpoint MinIO de la ruta elegida | ver la guía correspondiente |
 | `MINIO_IMPORT_BUCKET` | Bucket privado para CSV temporales | `record-academico-imports` |
 | `MINIO_ASSET_BUCKET` | Bucket privado y versionado para assets PDF | `record-academico-assets` |
 | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Credencial S3 de runtime | secreto externo |
@@ -317,27 +317,13 @@ mediante la configuración SQL. Nginx bloquea su descarga directa desde
 
 ## Instalación y despliegue
 
-### Con Docker Compose (recomendado)
+Elige una única ruta y sigue la guía completa; no combines sus archivos `.env`,
+comandos Compose ni directorios de datos.
 
-```bash
-# 1. Clonar el repositorio
-git clone <url-del-repositorio>
-cd sistema-records
-
-# 2. Configurar variables de entorno
-cp .env.example .env
-# Editar .env con los valores de tu entorno
-
-# 3. Construir e iniciar los contenedores de la aplicación
-docker compose up -d --build
-
-# 4. Verificar que los servicios estén corriendo
-docker compose ps
-```
-
-La aplicación estará disponible en `http://localhost:8010`.
-
-> El puerto del host es **8010** (no 80) para evitar conflictos con otros servicios locales. El contenedor Nginx escucha en el puerto 80 internamente.
+| Entorno | Guía canónica | MinIO |
+|---|---|---|
+| Desarrollo local | [Manual de desarrollo](docs/MANUAL_INSTALACION_DESARROLLO.md) | Contenedor local, perfil `local-infra` |
+| Dos nodos | [Instalación de nodo 1](docs/INSTALACION_NODO_1_DISCO_UNICO_HTTP.md) | Clúster compartido, un disco por servidor y HTTP privado |
 
 ### Servicios Docker
 
@@ -349,18 +335,9 @@ La aplicación estará disponible en `http://localhost:8010`.
 | `minio` | MinIO fijado por versión | `127.0.0.1:9000/9001` | Sólo perfil local `local-infra` |
 | `storage-init` | `academic-php:8.2-dev` | — | Inicializador idempotente de buckets, sólo perfil local |
 
-Para una prueba local completa, configure en `.env` los hosts internos
-`MINIO_ENDPOINT=http://minio:9000` y TLS desactivado; luego:
-
-```bash
-docker compose --profile local-infra up -d --build minio
-docker compose --profile local-infra run --rm storage-init
-docker compose --profile local-infra up -d php-app import-worker nginx
-```
-
-MinIO queda enlazado solamente a `127.0.0.1` en el host y a la red interna de
-Docker. El acceso público de la aplicación debe configurarse con HTTPS en el
-proxy inverso, sin exponer los puertos `9000` ni `9001` de MinIO.
+La guía local incluye el perfil `local-infra`, la inicialización de buckets y
+la verificación del servicio. La guía de dos nodos incluye la red privada,
+preflight, inicialización y validación cruzada.
 
 ### Límites de subida y memoria
 
