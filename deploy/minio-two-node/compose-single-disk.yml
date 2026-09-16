@@ -1,0 +1,62 @@
+# Perfil de contingencia: un único sistema de archivos por nodo.
+#
+# Forma un clúster MinIO de cuatro directorios lógicos (dos por nodo). No use
+# este archivo como si esos directorios fueran discos independientes: una falla
+# del disco del host pierde ambos fragmentos de ese nodo.
+name: academic-minio-single-disk
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    container_name: academic_minio_distributed
+    hostname: ${MINIO_NODE_NAME:?set MINIO_NODE_NAME to app-record-01 or app-record-02}
+    network_mode: host
+    command:
+      - server
+      - --address
+      - ":9000"
+      - --console-address
+      - "${MINIO_CONSOLE_ADDRESS:-127.0.0.1:9001}"
+      - "${MINIO_CLUSTER_SCHEME:-https}://app-record-{01...02}:9000/data{1...2}"
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
+      # Cuatro endpoints permiten como máximo EC:2.
+      MINIO_STORAGE_CLASS_STANDARD: EC:2
+    volumes:
+      - type: bind
+        source: ${MINIO_DATA_1:?set MINIO_DATA_1}
+        target: /data1
+      - type: bind
+        source: ${MINIO_DATA_2:?set MINIO_DATA_2}
+        target: /data2
+      - type: bind
+        source: ${MINIO_CERTS_DIR:?set MINIO_CERTS_DIR}
+        target: /root/.minio/certs
+        read_only: true
+    secrets:
+      - minio_root_user
+      - minio_root_password
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl --fail --silent --show-error --insecure
+          "${MINIO_CLUSTER_SCHEME:-https}://127.0.0.1:9000/minio/health/live"
+          >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 2m
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+secrets:
+  minio_root_user:
+    file: ${MINIO_ROOT_USER_FILE:?set MINIO_ROOT_USER_FILE}
+  minio_root_password:
+    file: ${MINIO_ROOT_PASSWORD_FILE:?set MINIO_ROOT_PASSWORD_FILE}
