@@ -229,15 +229,15 @@ Los roles **no** vienen del token de Keycloak. Se consultan en una base instituc
 
 #### MinIO/S3 y estado compartido
 
-En producción, los dos nodos usan el mismo clúster, buckets y credenciales. Con
-un F5/VIP también usan el mismo endpoint; sin éste, cada aplicación puede usar
-el miembro MinIO de su propio servidor. Las variables completas y el orden de
-migración están en la [guía multinodo](docs/ALMACENAMIENTO_MULTINODO.md).
+MinIO es un servicio privado de la red de la aplicación. No se publica a
+Internet: los contenedores se conectan por HTTP mediante el nombre `minio`.
+El HTTPS público se termina en el proxy o servidor web de la aplicación y no
+requiere certificados `.key` ni CA en MinIO.
 
 | Variable | Descripción | Valor de producción |
 |---|---|---|
 | `STORAGE_DRIVER` | Backend de objetos (`s3` o `local`) | `s3` |
-| `MINIO_ENDPOINT` | VIP S3 común o miembro local del mismo clúster | `https://minio.interno.example` |
+| `MINIO_ENDPOINT` | Endpoint interno de MinIO | `http://minio:9000` |
 | `MINIO_IMPORT_BUCKET` | Bucket privado para CSV temporales | `record-academico-imports` |
 | `MINIO_ASSET_BUCKET` | Bucket privado y versionado para assets PDF | `record-academico-assets` |
 | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Credencial S3 de runtime | secreto externo |
@@ -358,12 +358,9 @@ docker compose --profile local-infra run --rm storage-init
 docker compose --profile local-infra up -d php-app import-worker nginx
 ```
 
-En producción no use el MinIO de un nodo del perfil local. El repositorio
-incluye en `deploy/minio-two-node/` un clúster MinIO distribuido que se ejecuta
-sobre los mismos dos servidores de aplicación, con cuatro discos dedicados por
-host. Siga el [runbook de dos nodos](docs/ALMACENAMIENTO_MULTINODO.md), que
-incluye preflight, limitaciones de quorum, migración, health checks, prueba
-cruzada y rollback.
+MinIO queda enlazado solamente a `127.0.0.1` en el host y a la red interna de
+Docker. El acceso público de la aplicación debe configurarse con HTTPS en el
+proxy inverso, sin exponer los puertos `9000` ni `9001` de MinIO.
 
 ### Límites de subida y memoria
 
